@@ -1,4 +1,35 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Get terminal width, returns null if not available
+fn getTerminalWidth() ?usize {
+    if (!builtin.os.tag.isDarwin() and builtin.os.tag != .linux) {
+        return null; // Only support Unix-like systems
+    }
+
+    const stdout = std.fs.File.stdout();
+    if (!stdout.isTty()) return null;
+
+    // Use TIOCGWINSZ ioctl to get terminal size
+    const c = struct {
+        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+        const TIOCGWINSZ: c_ulong = if (builtin.os.tag.isDarwin()) 0x40087468 else 0x5413;
+        const winsize = extern struct {
+            ws_row: c_ushort,
+            ws_col: c_ushort,
+            ws_xpixel: c_ushort,
+            ws_ypixel: c_ushort,
+        };
+    };
+
+    var ws: c.winsize = undefined;
+    const result = c.ioctl(stdout.handle, c.TIOCGWINSZ, &ws);
+    if (result == -1 or ws.ws_col == 0) {
+        return null;
+    }
+
+    return @as(usize, ws.ws_col);
+}
 
 /// Progress bar for terminal visualization
 pub const ProgressBar = struct {
@@ -67,16 +98,32 @@ pub const ProgressBar = struct {
         else
             0.0;
 
+        // Dynamically calculate max label width based on terminal width
+        const term_width = getTerminalWidth() orelse 80; // Default to 80 if unknown
+        // Fixed content: "\r", ": [", "]", " 100% (99999/99999) | 99999 lines/s" ≈ 45 chars
+        // Bar width: self.bar_width (20) * 3 bytes per char (UTF-8) = 60 chars
+        const fixed_content_width = 45 + (self.bar_width * 3);
+        const available_for_label = if (term_width > fixed_content_width)
+            term_width - fixed_content_width
+        else
+            10; // Minimum label width
+
+        // Truncate label if needed
+        const display_label = if (self.label.len > available_for_label)
+            self.label[0..available_for_label]
+        else
+            self.label;
+
         // Build progress bar string
-        var bar_buffer: [256]u8 = undefined;
+        var bar_buffer: [512]u8 = undefined;
         var bar_len: usize = 0;
 
         // Add carriage return and label
         bar_buffer[bar_len] = '\r';
         bar_len += 1;
 
-        @memcpy(bar_buffer[bar_len .. bar_len + self.label.len], self.label);
-        bar_len += self.label.len;
+        @memcpy(bar_buffer[bar_len .. bar_len + display_label.len], display_label);
+        bar_len += display_label.len;
 
         bar_buffer[bar_len] = ':';
         bar_len += 1;
@@ -125,6 +172,12 @@ pub const ProgressBar = struct {
 
         // Print newline to move to next line
         try std.fs.File.stdout().writeAll("\n");
+    }
+
+    /// Clean up progress bar (best-effort, for use with defer)
+    /// This is the idiomatic Zig cleanup method that doesn't return errors
+    pub fn deinit(self: *ProgressBar) void {
+        self.finish() catch {}; // Best-effort finish, ignore errors
     }
 
     /// Clear the current progress bar line
@@ -242,4 +295,21 @@ test "status printer update" {
 
     try printer.update(50);
     try std.testing.expectEqual(@as(usize, 50), printer.current);
+}
+
+test "progress bar deinit can be deferred" {
+    var bar = ProgressBar.init("Test", 100);
+    bar.enabled = false; // Disable for testing
+    defer bar.deinit(); // Should work in defer
+
+    try bar.update(50);
+    // deinit() will be called automatically when scope exits
+}
+
+test "progress bar deinit is safe to call multiple times" {
+    var bar = ProgressBar.init("Test", 100);
+    bar.enabled = false; // Disable for testing
+
+    bar.deinit();
+    bar.deinit(); // Should be safe to call twice
 }

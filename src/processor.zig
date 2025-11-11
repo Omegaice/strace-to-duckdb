@@ -104,9 +104,9 @@ pub fn processFile(
     const line_buffer = try allocator.alloc(u8, buffer_size);
     defer allocator.free(line_buffer);
 
-    // Create progress bar with truncated filename (keep it short to fit terminal width)
-    const short_name = if (filename.len > 20) filename[0..20] else filename;
-    var pbar = ProgressBar.init(short_name, line_stats.total_lines);
+    // Create progress bar - it will automatically adjust label width to terminal size
+    var pbar = ProgressBar.init(filename, line_stats.total_lines);
+    defer pbar.deinit(); // Automatically finish progress bar on return
 
     // Second pass: process file with progress
     // Buffer is sized to max line length, so takeDelimiter should never fail with StreamTooLong
@@ -120,6 +120,7 @@ pub fn processFile(
         std.debug.print("Unexpected read error: {}\n", .{err});
         return err;
     }) |line| {
+        defer pbar.increment() catch {}; // Always increment progress, even on continue
         stats.total_lines += 1;
 
         // Parse the line
@@ -127,7 +128,6 @@ pub fn processFile(
             // Parsing error - count as failed
             stats.failed_lines += 1;
             std.debug.print("Parse error on line {}: {}\n", .{ stats.total_lines, err });
-            try pbar.increment();
             continue;
         };
 
@@ -137,7 +137,6 @@ pub fn processFile(
                 // Database insert error
                 stats.failed_lines += 1;
                 std.debug.print("Insert error on line {}: {}\n", .{ stats.total_lines, err });
-                try pbar.increment();
                 continue;
             };
             stats.parsed_lines += 1;
@@ -145,13 +144,7 @@ pub fn processFile(
             // Line didn't match any pattern (comment, empty, etc.)
             // Don't count as failed - these are expected
         }
-
-        // Update progress
-        try pbar.increment();
     }
-
-    // Finish progress bar
-    try pbar.finish();
 
     return stats;
 }
