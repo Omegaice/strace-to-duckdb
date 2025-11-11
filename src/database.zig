@@ -12,6 +12,7 @@ pub const Database = struct {
     db: c.duckdb_database,
     conn: c.duckdb_connection,
     path: []const u8,
+    appender: ?c.duckdb_appender,
 
     /// Initialize database and create schema
     /// Path can be a file path or ":memory:" for in-memory database
@@ -40,6 +41,7 @@ pub const Database = struct {
             .db = db,
             .conn = conn,
             .path = path,
+            .appender = null,
         };
 
         // Create schema
@@ -50,6 +52,10 @@ pub const Database = struct {
 
     /// Close database and clean up resources
     pub fn deinit(self: *Database) void {
+        // Clean up appender if it exists
+        if (self.appender != null) {
+            _ = c.duckdb_appender_destroy(&self.appender.?);
+        }
         c.duckdb_disconnect(&self.conn);
         c.duckdb_close(&self.db);
     }
@@ -162,6 +168,144 @@ pub const Database = struct {
             return error.InsertFailed;
         }
         c.duckdb_destroy_result(&result);
+    }
+
+    /// Begin bulk appending syscalls using DuckDB's appender API
+    /// This is much faster than individual inserts for large batches
+    pub fn beginAppend(self: *Database) !void {
+        // Destroy existing appender if any
+        if (self.appender != null) {
+            _ = c.duckdb_appender_destroy(&self.appender.?);
+        }
+
+        var appender: c.duckdb_appender = undefined;
+        if (c.duckdb_appender_create(self.conn, null, "syscalls", &appender) == c.DuckDBError) {
+            return error.AppenderCreateFailed;
+        }
+
+        self.appender = appender;
+    }
+
+    /// Append a single syscall using the appender API
+    /// Must call beginAppend() before using this method
+    pub fn appendSyscall(
+        self: *Database,
+        trace_file: []const u8,
+        pid: i32,
+        syscall: Syscall,
+    ) !void {
+        const appender = self.appender orelse return error.AppenderNotInitialized;
+
+        // Append each column in order
+        // Column 1: trace_file (VARCHAR)
+        if (c.duckdb_append_varchar_length(appender, @ptrCast(trace_file.ptr), @intCast(trace_file.len)) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+
+        // Column 2: pid (INTEGER)
+        if (c.duckdb_append_int32(appender, pid) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+
+        // Column 3: timestamp (VARCHAR)
+        if (c.duckdb_append_varchar_length(appender, @ptrCast(syscall.timestamp.ptr), @intCast(syscall.timestamp.len)) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+
+        // Column 4: syscall (VARCHAR)
+        if (c.duckdb_append_varchar_length(appender, @ptrCast(syscall.syscall.ptr), @intCast(syscall.syscall.len)) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+
+        // Column 5: args (TEXT)
+        if (c.duckdb_append_varchar_length(appender, @ptrCast(syscall.args.ptr), @intCast(syscall.args.len)) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+
+        // Column 6: return_value (BIGINT, nullable)
+        if (syscall.return_value) |val| {
+            if (c.duckdb_append_int64(appender, val) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        } else {
+            if (c.duckdb_append_null(appender) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        }
+
+        // Column 7: error_code (VARCHAR, nullable)
+        if (syscall.error_code) |code| {
+            if (c.duckdb_append_varchar_length(appender, @ptrCast(code.ptr), @intCast(code.len)) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        } else {
+            if (c.duckdb_append_null(appender) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        }
+
+        // Column 8: error_message (VARCHAR, nullable)
+        if (syscall.error_message) |msg| {
+            if (c.duckdb_append_varchar_length(appender, @ptrCast(msg.ptr), @intCast(msg.len)) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        } else {
+            if (c.duckdb_append_null(appender) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        }
+
+        // Column 9: duration (DOUBLE, nullable)
+        if (syscall.duration) |dur| {
+            if (c.duckdb_append_double(appender, dur) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        } else {
+            if (c.duckdb_append_null(appender) == c.DuckDBError) {
+                return error.AppendFailed;
+            }
+        }
+
+        // Column 10: unfinished (BOOLEAN)
+        if (c.duckdb_append_bool(appender, syscall.unfinished) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+
+        // Column 11: resumed (BOOLEAN)
+        if (c.duckdb_append_bool(appender, syscall.resumed) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+
+        // End the row
+        if (c.duckdb_appender_end_row(appender) == c.DuckDBError) {
+            return error.AppendFailed;
+        }
+    }
+
+    /// Flush the appender to commit all pending rows
+    pub fn flushAppend(self: *Database) !void {
+        const appender = self.appender orelse return error.AppenderNotInitialized;
+
+        if (c.duckdb_appender_flush(appender) == c.DuckDBError) {
+            return error.AppenderFlushFailed;
+        }
+    }
+
+    /// End appending and destroy the appender
+    /// This also flushes any remaining rows
+    pub fn endAppend(self: *Database) !void {
+        if (self.appender != null) {
+            // Flush before destroying
+            if (c.duckdb_appender_flush(self.appender.?) == c.DuckDBError) {
+                return error.AppenderFlushFailed;
+            }
+
+            if (c.duckdb_appender_destroy(&self.appender.?) == c.DuckDBError) {
+                return error.AppenderDestroyFailed;
+            }
+
+            self.appender = null;
+        }
     }
 
     /// Get count of total syscalls in database
@@ -448,4 +592,293 @@ test "query statistics" {
     try std.testing.expectEqual(@as(i64, 2), try db.getUniqueSyscallCount()); // open and read
     try std.testing.expectEqual(@as(i64, 2), try db.getUniquePidCount()); // 1234 and 5678
     try std.testing.expectEqual(@as(i64, 1), try db.getFailedSyscallCount()); // only the failed open
+}
+
+// ============================================================================
+// APPENDER API TESTS
+// ============================================================================
+
+test "appender basic workflow" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    // Begin appending
+    try db.beginAppend();
+
+    // Append a syscall
+    const syscall = Syscall.init(
+        "10:23:45.123456",
+        "open",
+        "\"/tmp/file\", O_RDONLY",
+        3,
+        null,
+        null,
+        0.000042,
+        false,
+        false,
+    );
+
+    try db.appendSyscall("test.trace", 1234, syscall);
+
+    // Flush and end
+    try db.endAppend();
+
+    // Verify it was inserted
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 1), count);
+}
+
+test "appender multiple syscalls" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    try db.beginAppend();
+
+    const syscalls = [_]Syscall{
+        Syscall.init("10:00:00.000001", "open", "\"file1\"", 3, null, null, 0.001, false, false),
+        Syscall.init("10:00:00.000002", "read", "3, buf, 100", 100, null, null, 0.002, false, false),
+        Syscall.init("10:00:00.000003", "write", "1, \"data\", 4", 4, null, null, 0.001, false, false),
+        Syscall.init("10:00:00.000004", "close", "3", 0, null, null, 0.0005, false, false),
+    };
+
+    for (syscalls) |syscall| {
+        try db.appendSyscall("test.trace", 5678, syscall);
+    }
+
+    try db.endAppend();
+
+    // Verify all were inserted
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 4), count);
+
+    const unique_count = try db.getUniqueSyscallCount();
+    try std.testing.expectEqual(@as(i64, 4), unique_count);
+}
+
+test "appender with null fields" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    try db.beginAppend();
+
+    // Syscall with various null fields
+    const syscall = Syscall.init(
+        "10:23:45.123456",
+        "exit",
+        "0",
+        null, // null return value
+        null, // null error code
+        null, // null error message
+        null, // null duration
+        false,
+        false,
+    );
+
+    try db.appendSyscall("test.trace", 1234, syscall);
+    try db.endAppend();
+
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 1), count);
+}
+
+test "appender with error codes" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    try db.beginAppend();
+
+    const syscall1 = Syscall.init(
+        "10:00:00.000001",
+        "open",
+        "\"/tmp/missing\"",
+        -1,
+        "ENOENT",
+        "No such file or directory",
+        0.000042,
+        false,
+        false,
+    );
+
+    const syscall2 = Syscall.init(
+        "10:00:00.000002",
+        "read",
+        "999, buf, 100",
+        -1,
+        "EBADF",
+        "Bad file descriptor",
+        0.000030,
+        false,
+        false,
+    );
+
+    try db.appendSyscall("test.trace", 1234, syscall1);
+    try db.appendSyscall("test.trace", 1234, syscall2);
+    try db.endAppend();
+
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 2), count);
+
+    const failed_count = try db.getFailedSyscallCount();
+    try std.testing.expectEqual(@as(i64, 2), failed_count);
+}
+
+test "appender with unfinished and resumed syscalls" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    try db.beginAppend();
+
+    const unfinished = Syscall.init(
+        "10:23:45.123456",
+        "read",
+        "3, ",
+        null,
+        null,
+        null,
+        null,
+        true, // unfinished
+        false,
+    );
+
+    const resumed = Syscall.init(
+        "10:23:45.123457",
+        "read",
+        "buffer, 100",
+        100,
+        null,
+        null,
+        0.000050,
+        false,
+        true, // resumed
+    );
+
+    try db.appendSyscall("test.trace", 1234, unfinished);
+    try db.appendSyscall("test.trace", 1234, resumed);
+    try db.endAppend();
+
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 2), count);
+}
+
+test "appender multiple batches with flush" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    try db.beginAppend();
+
+    // First batch
+    for (0..100) |i| {
+        const syscall = Syscall.init(
+            "10:00:00.000001",
+            "getpid",
+            "",
+            @intCast(i),
+            null,
+            null,
+            null,
+            false,
+            false,
+        );
+        try db.appendSyscall("test.trace", 1234, syscall);
+    }
+
+    // Flush intermediate
+    try db.flushAppend();
+
+    // Second batch
+    for (0..100) |i| {
+        const syscall = Syscall.init(
+            "10:00:00.000002",
+            "write",
+            "1, \"test\", 4",
+            4,
+            null,
+            null,
+            null,
+            false,
+            false,
+        );
+        try db.appendSyscall("test.trace", @intCast(5000 + i), syscall);
+    }
+
+    try db.endAppend();
+
+    // Verify all 200 were inserted
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 200), count);
+
+    const pid_count = try db.getUniquePidCount();
+    try std.testing.expectEqual(@as(i64, 101), pid_count); // 1234 + 100 unique PIDs
+}
+
+test "appender error without beginAppend" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    const syscall = Syscall.init(
+        "10:23:45.123456",
+        "open",
+        "\"file\"",
+        3,
+        null,
+        null,
+        0.001,
+        false,
+        false,
+    );
+
+    // Should fail because we didn't call beginAppend
+    const result = db.appendSyscall("test.trace", 1234, syscall);
+    try std.testing.expectError(error.AppenderNotInitialized, result);
+}
+
+test "appender multiple begin calls restart appender" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    // First session
+    try db.beginAppend();
+    const syscall1 = Syscall.init("10:00:00.000001", "open", "\"file1\"", 3, null, null, 0.001, false, false);
+    try db.appendSyscall("test.trace", 1234, syscall1);
+    try db.endAppend();
+
+    // Second session - beginAppend should work again
+    try db.beginAppend();
+    const syscall2 = Syscall.init("10:00:00.000002", "close", "3", 0, null, null, 0.001, false, false);
+    try db.appendSyscall("test.trace", 1234, syscall2);
+    try db.endAppend();
+
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 2), count);
+}
+
+test "appender large batch performance test" {
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    try db.beginAppend();
+
+    // Insert 1000 syscalls to test batching
+    for (0..1000) |i| {
+        const syscall = Syscall.init(
+            "10:23:45.123456",
+            "write",
+            "1, \"test data\", 9",
+            9,
+            null,
+            null,
+            0.000020,
+            false,
+            false,
+        );
+        try db.appendSyscall("test.trace", @intCast(i), syscall);
+    }
+
+    try db.endAppend();
+
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 1000), count);
+
+    const pid_count = try db.getUniquePidCount();
+    try std.testing.expectEqual(@as(i64, 1000), pid_count);
 }

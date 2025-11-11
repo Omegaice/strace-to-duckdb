@@ -108,6 +108,10 @@ pub fn processFile(
     var pbar = ProgressBar.init(filename, line_stats.total_lines);
     defer pbar.deinit(); // Automatically finish progress bar on return
 
+    // Begin bulk appending for much faster inserts
+    try db.beginAppend();
+    defer db.endAppend() catch {}; // Always end appender, even on error
+
     // Second pass: process file with progress
     // Buffer is sized to max line length, so takeDelimiter should never fail with StreamTooLong
     const file = try std.fs.cwd().openFile(file_path, .{});
@@ -132,11 +136,11 @@ pub fn processFile(
         };
 
         if (maybe_syscall) |syscall| {
-            // Successfully parsed - insert into database
-            db.insertSyscall(filename, pid, syscall) catch |err| {
-                // Database insert error
+            // Successfully parsed - append to database using fast appender API
+            db.appendSyscall(filename, pid, syscall) catch |err| {
+                // Database append error
                 stats.failed_lines += 1;
-                std.debug.print("Insert error on line {}: {}\n", .{ stats.total_lines, err });
+                std.debug.print("Append error on line {}: {}\n", .{ stats.total_lines, err });
                 continue;
             };
             stats.parsed_lines += 1;
