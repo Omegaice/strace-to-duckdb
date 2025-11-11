@@ -1,100 +1,143 @@
 const std = @import("std");
-
-// Import DuckDB C API
-const c = @cImport({
-    @cInclude("duckdb.h");
-});
+const database = @import("database.zig");
+const processor = @import("processor.zig");
+const Database = database.Database;
 
 pub fn main() !void {
-    try std.fs.File.stdout().writeAll("Creating DuckDB database...\n");
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    // Create database and connection
-    var db: c.duckdb_database = undefined;
-    var con: c.duckdb_connection = undefined;
+    // Parse command line arguments
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    // Open database (NULL for in-memory)
-    if (c.duckdb_open(null, &db) == c.DuckDBError) {
-        try std.fs.File.stdout().writeAll("Error: Failed to open database\n");
-        return error.DatabaseOpenFailed;
-    }
-    defer c.duckdb_close(&db);
-
-    // Connect to database
-    if (c.duckdb_connect(db, &con) == c.DuckDBError) {
-        try std.fs.File.stdout().writeAll("Error: Failed to connect to database\n");
-        return error.DatabaseConnectFailed;
-    }
-    defer c.duckdb_disconnect(&con);
-
-    try std.fs.File.stdout().writeAll("Database connected successfully!\n\n");
-
-    // Create a table
-    try std.fs.File.stdout().writeAll("Creating table...\n");
-    var result: c.duckdb_result = undefined;
-    var state = c.duckdb_query(con, "CREATE TABLE test (id INTEGER, name VARCHAR)", null);
-    if (state == c.DuckDBError) {
-        try std.fs.File.stdout().writeAll("Error: Failed to create table\n");
-        return error.QueryFailed;
+    if (args.len < 2) {
+        try printUsage(args[0]);
+        std.process.exit(1);
     }
 
-    // Insert data
-    try std.fs.File.stdout().writeAll("Inserting data...\n");
-    state = c.duckdb_query(con, "INSERT INTO test VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Charlie')", null);
-    if (state == c.DuckDBError) {
-        try std.fs.File.stdout().writeAll("Error: Failed to insert data\n");
-        return error.QueryFailed;
-    }
+    // Default output database
+    var output_db: []const u8 = "strace.db";
+    var trace_files = std.ArrayListUnmanaged([]const u8){};
+    defer trace_files.deinit(allocator);
 
-    // Query data
-    try std.fs.File.stdout().writeAll("Querying data...\n\n");
-    state = c.duckdb_query(con, "SELECT * FROM test", &result);
-    if (state == c.DuckDBError) {
-        try std.fs.File.stdout().writeAll("Error: Failed to query data\n");
-        return error.QueryFailed;
-    }
-    defer c.duckdb_destroy_result(&result);
+    // Parse arguments
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
 
-    // Print results
-    const row_count = c.duckdb_row_count(&result);
-    const col_count = c.duckdb_column_count(&result);
-
-    std.debug.print("Results ({} rows, {} columns):\n", .{ row_count, col_count });
-
-    // Print column names
-    var col: usize = 0;
-    while (col < col_count) : (col += 1) {
-        const col_name = c.duckdb_column_name(&result, @intCast(col));
-        if (col > 0) std.debug.print(" | ", .{});
-        std.debug.print("{s}", .{col_name});
-    }
-    std.debug.print("\n", .{});
-
-    // Print separator
-    col = 0;
-    while (col < col_count) : (col += 1) {
-        if (col > 0) std.debug.print("-+-", .{});
-        std.debug.print("----------", .{});
-    }
-    std.debug.print("\n", .{});
-
-    // Print rows
-    var row: usize = 0;
-    while (row < row_count) : (row += 1) {
-        col = 0;
-        while (col < col_count) : (col += 1) {
-            if (col > 0) std.debug.print(" | ", .{});
-
-            const val = c.duckdb_value_varchar(&result, @intCast(col), @intCast(row));
-            defer c.duckdb_free(val);
-
-            if (val != null) {
-                std.debug.print("{s: <10}", .{val});
-            } else {
-                std.debug.print("NULL      ", .{});
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            // Next arg is the output database
+            i += 1;
+            if (i >= args.len) {
+                try std.fs.File.stdout().writeAll("Error: -o requires an argument\n");
+                std.process.exit(1);
             }
+            output_db = args[i];
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            try printUsage(args[0]);
+            std.process.exit(0);
+        } else {
+            // It's a trace file
+            try trace_files.append(allocator, arg);
         }
-        std.debug.print("\n", .{});
     }
+
+    if (trace_files.items.len == 0) {
+        try std.fs.File.stdout().writeAll("Error: No trace files specified\n\n");
+        try printUsage(args[0]);
+        std.process.exit(1);
+    }
+
+    // Print what we're doing
+    try std.fs.File.stdout().writeAll("Creating database: ");
+    try std.fs.File.stdout().writeAll(output_db);
+    try std.fs.File.stdout().writeAll("\n");
+
+    // Delete existing database if it exists (overwrite mode)
+    std.fs.cwd().deleteFile(output_db) catch |err| {
+        if (err != error.FileNotFound) {
+            std.debug.print("Warning: Could not delete existing database: {}\n", .{err});
+        }
+    };
+
+    // Create database
+    var db = try Database.init(output_db);
+    defer db.deinit();
+
+    try std.fs.File.stdout().writeAll("Database created successfully\n\n");
+
+    // Process each trace file
+    var total_lines: usize = 0;
+    var total_parsed: usize = 0;
+    var total_failed: usize = 0;
+
+    for (trace_files.items) |trace_file| {
+        // Check if file exists
+        std.fs.cwd().access(trace_file, .{}) catch |err| {
+            std.debug.print("Warning: Cannot access file '{s}': {}\n", .{ trace_file, err });
+            continue;
+        };
+
+        try std.fs.File.stdout().writeAll("Processing: ");
+        try std.fs.File.stdout().writeAll(trace_file);
+        try std.fs.File.stdout().writeAll("\n");
+
+        const stats = try processor.processFile(allocator, &db, trace_file);
+
+        std.debug.print("  Lines: {}, Parsed: {}, Failed: {}\n", .{
+            stats.total_lines,
+            stats.parsed_lines,
+            stats.failed_lines,
+        });
+
+        total_lines += stats.total_lines;
+        total_parsed += stats.parsed_lines;
+        total_failed += stats.failed_lines;
+    }
+
+    // Print summary
+    try std.fs.File.stdout().writeAll("\n=== Summary ===\n");
+    std.debug.print("Files processed: {}\n", .{trace_files.items.len});
+    std.debug.print("Total lines: {}\n", .{total_lines});
+    std.debug.print("Total syscalls parsed: {}\n", .{total_parsed});
+    std.debug.print("Total failed lines: {}\n", .{total_failed});
+    std.debug.print("Database: {s}\n", .{output_db});
+
+    // Database statistics
+    try std.fs.File.stdout().writeAll("\n=== Database Statistics ===\n");
+    const syscall_count = try db.getSyscallCount();
+    std.debug.print("Total syscalls in DB: {}\n", .{syscall_count});
+
+    const unique_syscalls = try db.getUniqueSyscallCount();
+    std.debug.print("Unique syscalls: {}\n", .{unique_syscalls});
+
+    const unique_pids = try db.getUniquePidCount();
+    std.debug.print("Unique PIDs: {}\n", .{unique_pids});
+
+    const failed_syscalls = try db.getFailedSyscallCount();
+    std.debug.print("Failed syscalls: {}\n", .{failed_syscalls});
 
     try std.fs.File.stdout().writeAll("\nSuccess!\n");
+}
+
+fn printUsage(program_name: []const u8) !void {
+    const usage =
+        \\Usage: {s} [OPTIONS] <trace_files...>
+        \\
+        \\Parse strace output files and load them into a DuckDB database.
+        \\
+        \\Options:
+        \\  -o, --output <file>  Output database file (default: strace.db)
+        \\  -h, --help           Show this help message
+        \\
+        \\Examples:
+        \\  {s} trace.1234 trace.5678
+        \\  {s} -o output.db trace.*
+        \\  {s} --output mydata.db strace-*.log
+        \\
+    ;
+
+    std.debug.print(usage, .{ program_name, program_name, program_name, program_name });
 }
