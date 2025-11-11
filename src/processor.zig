@@ -55,8 +55,12 @@ pub fn processFile(
     const filename = std.fs.path.basename(file_path);
     const pid = extractPid(filename) orelse 0; // Default to 0 if no PID found
 
-    // First pass: count total lines for accurate progress
+    // Maximum line length we'll process (10MB sanity cap)
+    const MAX_LINE_SIZE: usize = 10 * 1024 * 1024;
+
+    // First pass: count total lines and find maximum line length
     var total_lines: usize = 0;
+    var max_line_length: usize = 0;
     {
         const file = try std.fs.cwd().openFile(file_path, .{});
         defer file.close();
@@ -64,21 +68,28 @@ pub fn processFile(
         var count_buffer: [8192]u8 = undefined;
         var count_reader = file.reader(&count_buffer);
 
-        while (count_reader.interface.takeDelimiter('\n') catch null) |_| {
+        while (true) {
+            const bytes_discarded = count_reader.interface.discardDelimiterInclusive('\n') catch break;
             total_lines += 1;
+            max_line_length = @max(max_line_length, bytes_discarded);
         }
     }
 
-    // Create progress bar with truncated filename
-    const short_name = if (filename.len > 30) filename[0..30] else filename;
+    // Allocate buffer based on actual maximum line length (capped at 10MB)
+    // Use at least 4KB to avoid tiny allocations for empty/small files
+    const buffer_size = @min(@max(max_line_length, 4096), MAX_LINE_SIZE);
+    const line_buffer = try allocator.alloc(u8, buffer_size);
+    defer allocator.free(line_buffer);
+
+    // Create progress bar with truncated filename (keep it short to fit terminal width)
+    const short_name = if (filename.len > 20) filename[0..20] else filename;
     var pbar = ProgressBar.init(short_name, total_lines);
 
     // Second pass: process file with progress
     const file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
 
-    var file_buffer: [8192]u8 = undefined;
-    var reader = file.reader(&file_buffer);
+    var reader = file.reader(line_buffer);
 
     while (reader.interface.takeDelimiter('\n') catch |err| {
         std.debug.print("Read error: {}\n", .{err});
@@ -311,4 +322,130 @@ test "processFile with unfinished and resumed syscalls" {
 
     const count = try db.getSyscallCount();
     try std.testing.expectEqual(@as(i64, 3), count);
+}
+
+test "processFile with very long lines exceeding buffer size" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/longlines.3333";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    // Create a line longer than 8192 bytes (the buffer size)
+    // This simulates strace output with very long arguments
+    const long_data = "A" ** 10000; // 10KB line
+
+    try file.writeAll("10:23:45.123456 read(3, \"");
+    try file.writeAll(long_data);
+    try file.writeAll("\", 10000) = 10000 <0.000100>\n");
+    try file.writeAll("10:23:45.123457 write(1, \"short\", 5) = 5 <0.000020>\n");
+    try file.writeAll("10:23:45.123458 read(4, \"");
+    try file.writeAll(long_data);
+    try file.writeAll("\", 10000) = 10000 <0.000100>\n");
+    file.close();
+
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    const stats = try processFile(allocator, &db, test_file);
+
+    // Should count all 3 lines correctly despite some being > 8192 bytes
+    try std.testing.expectEqual(@as(usize, 3), stats.total_lines);
+    try std.testing.expectEqual(@as(usize, 3), stats.parsed_lines);
+
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 3), count);
+}
+
+test "processFile with extremely long line (50KB)" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/extremelong.4444";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    // Create an extremely long line (50KB) - multiple times larger than buffer
+    const huge_data = "X" ** 50000;
+
+    try file.writeAll("10:23:45.123456 read(3, \"");
+    try file.writeAll(huge_data);
+    try file.writeAll("\", 50000) = 50000 <0.001000>\n");
+    try file.writeAll("10:23:45.123457 close(3) = 0 <0.000010>\n");
+    file.close();
+
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    const stats = try processFile(allocator, &db, test_file);
+
+    // Should handle extremely long lines correctly
+    try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
+    try std.testing.expectEqual(@as(usize, 2), stats.parsed_lines);
+}
+
+test "processFile with file ending without newline" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/nonewline.5555";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    // File with lines but no trailing newline on the last line
+    const test_data = "10:23:45.123456 open(\"/tmp/file\", O_RDONLY) = 3 <0.000042>\n10:23:45.123457 close(3) = 0 <0.000010>";
+    try file.writeAll(test_data);
+    file.close();
+
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    const stats = try processFile(allocator, &db, test_file);
+
+    // Both lines should be counted even though last one has no newline
+    try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
+}
+
+test "processFile counts lines correctly with mixed lengths" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/mixed.6666";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    const long_data = "B" ** 9000; // Just over 8KB buffer size
+
+    // Mix of short and long lines
+    try file.writeAll("10:23:45.123456 getpid() = 1234 <0.000010>\n"); // Short
+    try file.writeAll("10:23:45.123457 read(3, \"");
+    try file.writeAll(long_data);
+    try file.writeAll("\", 9000) = 9000 <0.000100>\n"); // Long
+    try file.writeAll("10:23:45.123458 write(1, \"test\", 4) = 4 <0.000020>\n"); // Short
+    try file.writeAll("10:23:45.123459 read(4, \"");
+    try file.writeAll(long_data);
+    try file.writeAll("\", 9000) = 9000 <0.000100>\n"); // Long
+    try file.writeAll("10:23:45.123460 close(3) = 0 <0.000010>\n"); // Short
+    file.close();
+
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    const stats = try processFile(allocator, &db, test_file);
+
+    // All 5 lines should be counted correctly
+    try std.testing.expectEqual(@as(usize, 5), stats.total_lines);
+    try std.testing.expectEqual(@as(usize, 5), stats.parsed_lines);
+
+    const count = try db.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, 5), count);
 }

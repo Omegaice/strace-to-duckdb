@@ -7,7 +7,7 @@ pub const ProgressBar = struct {
     label: []const u8,
     enabled: bool,
     start_time: i64,
-    bar_width: usize = 30,
+    bar_width: usize = 20,
 
     /// Initialize a progress bar
     pub fn init(label: []const u8, total: usize) ProgressBar {
