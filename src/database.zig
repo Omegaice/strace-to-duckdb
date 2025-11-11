@@ -98,78 +98,6 @@ pub const Database = struct {
         }
     }
 
-    /// Insert a parsed syscall into the database
-    pub fn insertSyscall(
-        self: *Database,
-        trace_file: []const u8,
-        pid: i32,
-        syscall: Syscall,
-    ) !void {
-        // Use prepared statement for safe parameter binding
-        var stmt: c.duckdb_prepared_statement = undefined;
-
-        const query =
-            \\INSERT INTO syscalls (
-            \\    trace_file, pid, timestamp, syscall, args,
-            \\    return_value, error_code, error_message, duration,
-            \\    unfinished, resumed
-            \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ;
-
-        if (c.duckdb_prepare(self.conn, query, &stmt) == c.DuckDBError) {
-            return error.PrepareStatementFailed;
-        }
-        defer c.duckdb_destroy_prepare(&stmt);
-
-        // Bind parameters (1-indexed in DuckDB)
-        // VARCHAR parameters (use length-based binding for non-null-terminated slices)
-        _ = c.duckdb_bind_varchar_length(stmt, 1, @ptrCast(trace_file.ptr), @intCast(trace_file.len));
-        _ = c.duckdb_bind_int32(stmt, 2, pid);
-        _ = c.duckdb_bind_varchar_length(stmt, 3, @ptrCast(syscall.timestamp.ptr), @intCast(syscall.timestamp.len));
-        _ = c.duckdb_bind_varchar_length(stmt, 4, @ptrCast(syscall.syscall.ptr), @intCast(syscall.syscall.len));
-        _ = c.duckdb_bind_varchar_length(stmt, 5, @ptrCast(syscall.args.ptr), @intCast(syscall.args.len));
-
-        // Return value (nullable)
-        if (syscall.return_value) |val| {
-            _ = c.duckdb_bind_int64(stmt, 6, val);
-        } else {
-            _ = c.duckdb_bind_null(stmt, 6);
-        }
-
-        // Error code (nullable)
-        if (syscall.error_code) |code| {
-            _ = c.duckdb_bind_varchar_length(stmt, 7, @ptrCast(code.ptr), @intCast(code.len));
-        } else {
-            _ = c.duckdb_bind_null(stmt, 7);
-        }
-
-        // Error message (nullable)
-        if (syscall.error_message) |msg| {
-            _ = c.duckdb_bind_varchar_length(stmt, 8, @ptrCast(msg.ptr), @intCast(msg.len));
-        } else {
-            _ = c.duckdb_bind_null(stmt, 8);
-        }
-
-        // Duration (nullable)
-        if (syscall.duration) |dur| {
-            _ = c.duckdb_bind_double(stmt, 9, dur);
-        } else {
-            _ = c.duckdb_bind_null(stmt, 9);
-        }
-
-        // Boolean flags
-        _ = c.duckdb_bind_boolean(stmt, 10, syscall.unfinished);
-        _ = c.duckdb_bind_boolean(stmt, 11, syscall.resumed);
-
-        // Execute statement
-        var result: c.duckdb_result = undefined;
-        if (c.duckdb_execute_prepared(stmt, &result) == c.DuckDBError) {
-            defer c.duckdb_destroy_result(&result);
-            return error.InsertFailed;
-        }
-        c.duckdb_destroy_result(&result);
-    }
-
     /// Begin bulk appending syscalls using DuckDB's appender API
     /// This is much faster than individual inserts for large batches
     pub fn beginAppend(self: *Database) !void {
@@ -406,7 +334,9 @@ test "insert single syscall" {
         false,
     );
 
-    try db.insertSyscall("test.trace", 1234, syscall);
+    try db.beginAppend();
+    try db.appendSyscall("test.trace", 1234, syscall);
+    try db.endAppend();
 
     // Verify it was inserted
     const count = try db.getSyscallCount();
@@ -429,7 +359,9 @@ test "insert syscall with null fields" {
         false,
     );
 
-    try db.insertSyscall("test.trace", 1234, syscall);
+    try db.beginAppend();
+    try db.appendSyscall("test.trace", 1234, syscall);
+    try db.endAppend();
 
     const count = try db.getSyscallCount();
     try std.testing.expectEqual(@as(i64, 1), count);
@@ -451,7 +383,9 @@ test "insert syscall with error" {
         false,
     );
 
-    try db.insertSyscall("test.trace", 1234, syscall);
+    try db.beginAppend();
+    try db.appendSyscall("test.trace", 1234, syscall);
+    try db.endAppend();
 
     // Verify it was inserted and error is tracked
     const count = try db.getSyscallCount();
@@ -501,9 +435,11 @@ test "insert multiple syscalls" {
         false,
     );
 
-    try db.insertSyscall("test.trace", 1234, syscall1);
-    try db.insertSyscall("test.trace", 1234, syscall2);
-    try db.insertSyscall("test.trace", 1234, syscall3);
+    try db.beginAppend();
+    try db.appendSyscall("test.trace", 1234, syscall1);
+    try db.appendSyscall("test.trace", 1234, syscall2);
+    try db.appendSyscall("test.trace", 1234, syscall3);
+    try db.endAppend();
 
     const count = try db.getSyscallCount();
     try std.testing.expectEqual(@as(i64, 3), count);
@@ -528,9 +464,11 @@ test "insert syscalls from different PIDs" {
         false,
     );
 
-    try db.insertSyscall("test.trace", 1234, syscall);
-    try db.insertSyscall("test.trace", 5678, syscall);
-    try db.insertSyscall("test.trace", 9012, syscall);
+    try db.beginAppend();
+    try db.appendSyscall("test.trace", 1234, syscall);
+    try db.appendSyscall("test.trace", 5678, syscall);
+    try db.appendSyscall("test.trace", 9012, syscall);
+    try db.endAppend();
 
     const count = try db.getSyscallCount();
     try std.testing.expectEqual(@as(i64, 3), count);
@@ -567,8 +505,10 @@ test "insert unfinished and resumed syscalls" {
         true, // resumed
     );
 
-    try db.insertSyscall("test.trace", 1234, unfinished);
-    try db.insertSyscall("test.trace", 1234, resumed);
+    try db.beginAppend();
+    try db.appendSyscall("test.trace", 1234, unfinished);
+    try db.appendSyscall("test.trace", 1234, resumed);
+    try db.endAppend();
 
     const count = try db.getSyscallCount();
     try std.testing.expectEqual(@as(i64, 2), count);
@@ -583,9 +523,11 @@ test "query statistics" {
     const open_fail = Syscall.init("10:00:00.000002", "open", "\"file2\"", -1, "ENOENT", "No such file", 0.001, false, false);
     const read_syscall = Syscall.init("10:00:00.000003", "read", "3, buf, 100", 100, null, null, 0.002, false, false);
 
-    try db.insertSyscall("trace1.txt", 1234, open_success);
-    try db.insertSyscall("trace1.txt", 1234, open_fail);
-    try db.insertSyscall("trace2.txt", 5678, read_syscall);
+    try db.beginAppend();
+    try db.appendSyscall("trace1.txt", 1234, open_success);
+    try db.appendSyscall("trace1.txt", 1234, open_fail);
+    try db.appendSyscall("trace2.txt", 5678, read_syscall);
+    try db.endAppend();
 
     // Test statistics
     try std.testing.expectEqual(@as(i64, 3), try db.getSyscallCount());
