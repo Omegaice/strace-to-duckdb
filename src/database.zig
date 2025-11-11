@@ -13,14 +13,57 @@ pub const Database = struct {
     conn: c.duckdb_connection,
     path: []const u8,
     appender: ?c.duckdb_appender,
+    owns_db: bool, // Does this struct own the database instance?
 
     /// Initialize database and create schema
     /// Path can be a file path or ":memory:" for in-memory database
     pub fn init(path: []const u8) !Database {
+        var database = try Database.open(path);
+
+        // Create schema
+        try database.createSchema();
+
+        return database;
+    }
+
+    /// Get the database instance for creating additional connections
+    /// Used by worker threads to connect to the same database instance
+    pub fn getDbInstance(self: *const Database) c.duckdb_database {
+        return self.db;
+    }
+
+    /// Create a new connection to an existing database instance
+    /// Used by worker threads - does NOT own the database instance
+    pub fn connectToInstance(db_instance: c.duckdb_database) !Database {
+        var conn: c.duckdb_connection = undefined;
+
+        if (c.duckdb_connect(db_instance, &conn) == c.DuckDBError) {
+            return error.DatabaseConnectFailed;
+        }
+        errdefer c.duckdb_disconnect(&conn);
+
+        return Database{
+            .db = db_instance,
+            .conn = conn,
+            .path = "",
+            .appender = null,
+            .owns_db = false, // Worker doesn't own the db instance
+        };
+    }
+
+    /// Open an existing database without creating schema
+    /// Used by worker threads to connect to an already-initialized database
+    /// DEPRECATED: Use connectToInstance() instead for proper concurrency
+    pub fn openExisting(path: []const u8) !Database {
+        return Database.open(path);
+    }
+
+    /// Internal: Open database connection
+    fn open(path: []const u8) !Database {
         var db: c.duckdb_database = undefined;
         var conn: c.duckdb_connection = undefined;
 
-        // Open database - DuckDB will create if doesn't exist, or overwrite if it does
+        // Open database - DuckDB will create if doesn't exist
         const path_cstr = if (std.mem.eql(u8, path, ":memory:"))
             null
         else
@@ -37,17 +80,13 @@ pub const Database = struct {
         }
         errdefer c.duckdb_disconnect(&conn);
 
-        var database = Database{
+        return Database{
             .db = db,
             .conn = conn,
             .path = path,
             .appender = null,
+            .owns_db = true, // This instance owns the db
         };
-
-        // Create schema
-        try database.createSchema();
-
-        return database;
     }
 
     /// Close database and clean up resources
@@ -57,7 +96,11 @@ pub const Database = struct {
             _ = c.duckdb_appender_destroy(&self.appender.?);
         }
         c.duckdb_disconnect(&self.conn);
-        c.duckdb_close(&self.db);
+
+        // Only close database if we own it
+        if (self.owns_db) {
+            c.duckdb_close(&self.db);
+        }
     }
 
     /// Create database schema (tables and indexes)
@@ -823,4 +866,143 @@ test "appender large batch performance test" {
 
     const pid_count = try db.getUniquePidCount();
     try std.testing.expectEqual(@as(i64, 1000), pid_count);
+}
+
+// ============================================================================
+// CONCURRENCY TESTS
+// ============================================================================
+
+test "multiple concurrent appenders to same database file" {
+    const allocator = std.testing.allocator;
+
+    // Create test directory
+    const test_dir = "zig-cache/test-concurrent";
+    try std.fs.cwd().makePath(test_dir);
+    defer std.fs.cwd().deleteTree(test_dir) catch {};
+
+    const db_path = "zig-cache/test-concurrent/concurrent.db";
+
+    // Create database and schema (main thread owns it)
+    var db_main = try Database.init(db_path);
+    defer db_main.deinit();
+
+    // Get the database instance for workers
+    const db_instance = db_main.getDbInstance();
+
+    // Thread context
+    const ThreadContext = struct {
+        thread_id: usize,
+        db_instance: c.duckdb_database,
+        syscalls_to_insert: usize,
+        allocator: std.mem.Allocator,
+
+        fn run(self: @This()) !void {
+            // Connect to the SAME database instance (not reopening the file)
+            var db = try Database.connectToInstance(self.db_instance);
+            defer db.deinit();
+
+            try db.beginAppend();
+            for (0..self.syscalls_to_insert) |j| {
+                const syscall = Syscall.init(
+                    "10:00:00.000001",
+                    "write",
+                    "1, \"test\", 4",
+                    // Unique return value per thread and iteration
+                    @as(i64, @intCast(self.thread_id * 10000 + j)),
+                    null,
+                    null,
+                    0.000001,
+                    false,
+                    false,
+                );
+                try db.appendSyscall("test.trace", @intCast(self.thread_id), syscall);
+            }
+            try db.endAppend();
+        }
+    };
+
+    const num_threads = 4;
+    const syscalls_per_thread = 50;
+    var threads: [num_threads]std.Thread = undefined;
+    var errors: [num_threads]?anyerror = [_]?anyerror{null} ** num_threads;
+
+    // Thread wrapper to capture errors
+    const ThreadWrapper = struct {
+        ctx: ThreadContext,
+        error_slot: *?anyerror,
+
+        fn runWrapper(self: @This()) void {
+            ThreadContext.run(self.ctx) catch |err| {
+                self.error_slot.* = err;
+            };
+        }
+    };
+
+    // Spawn threads
+    for (0..num_threads) |i| {
+        threads[i] = try std.Thread.spawn(.{}, ThreadWrapper.runWrapper, .{ThreadWrapper{
+            .ctx = ThreadContext{
+                .thread_id = i,
+                .db_instance = db_instance,
+                .syscalls_to_insert = syscalls_per_thread,
+                .allocator = allocator,
+            },
+            .error_slot = &errors[i],
+        }});
+    }
+
+    // Join all threads
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    // Check for thread errors
+    for (errors, 0..) |maybe_err, i| {
+        if (maybe_err) |err| {
+            std.debug.print("Thread {d} failed with error: {}\n", .{ i, err });
+            return err;
+        }
+    }
+
+    // Verify results using the main database connection
+    // Should have exactly num_threads * syscalls_per_thread rows
+    const count = try db_main.getSyscallCount();
+    try std.testing.expectEqual(@as(i64, num_threads * syscalls_per_thread), count);
+
+    // Verify each thread's data is complete
+    const unique_pids = try db_main.getUniquePidCount();
+    try std.testing.expectEqual(@as(i64, num_threads), unique_pids);
+}
+
+test "atomic counter correctness with concurrent updates" {
+    var counter = std.atomic.Value(usize).init(0);
+
+    const ThreadContext = struct {
+        counter: *std.atomic.Value(usize),
+        increments: usize,
+
+        fn run(self: @This()) void {
+            for (0..self.increments) |_| {
+                _ = self.counter.fetchAdd(1, .seq_cst);
+            }
+        }
+    };
+
+    const num_threads = 8;
+    const increments_per_thread = 500;
+    var threads: [num_threads]std.Thread = undefined;
+
+    for (0..num_threads) |i| {
+        threads[i] = try std.Thread.spawn(.{}, ThreadContext.run, .{ThreadContext{
+            .counter = &counter,
+            .increments = increments_per_thread,
+        }});
+    }
+
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    const final_count = counter.load(.seq_cst);
+    try std.testing.expectEqual(@as(usize, num_threads * increments_per_thread), final_count);
 }

@@ -80,10 +80,12 @@ pub fn extractPid(filename: []const u8) ?i32 {
 
 /// Process a single strace trace file
 /// Returns statistics about the processing
+/// If show_progress is false, no per-file progress bar will be displayed (useful for parallel processing)
 pub fn processFile(
     allocator: std.mem.Allocator,
     db: *Database,
     file_path: []const u8,
+    show_progress: bool,
 ) !ProcessStats {
     var stats = ProcessStats.init();
 
@@ -104,8 +106,11 @@ pub fn processFile(
     const line_buffer = try allocator.alloc(u8, buffer_size);
     defer allocator.free(line_buffer);
 
-    // Create progress bar - it will automatically adjust label width to terminal size
+    // Create progress bar only if requested
     var pbar = ProgressBar.init(filename, line_stats.total_lines);
+    if (!show_progress) {
+        pbar.enabled = false;
+    }
     defer pbar.deinit(); // Automatically finish progress bar on return
 
     // Begin bulk appending for much faster inserts
@@ -213,7 +218,7 @@ test "processFile with valid trace data" {
     defer db.deinit();
 
     // Process the file
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     // Verify statistics
     try std.testing.expectEqual(@as(usize, 7), stats.total_lines); // 7 lines total
@@ -242,7 +247,7 @@ test "processFile with empty file" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     try std.testing.expectEqual(@as(usize, 0), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 0), stats.parsed_lines);
@@ -274,7 +279,7 @@ test "processFile with only invalid lines" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     try std.testing.expectEqual(@as(usize, 5), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 0), stats.parsed_lines);
@@ -303,7 +308,7 @@ test "processFile with syscall errors" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 2), stats.parsed_lines);
@@ -337,7 +342,7 @@ test "processFile with unfinished and resumed syscalls" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     try std.testing.expectEqual(@as(usize, 3), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 3), stats.parsed_lines);
@@ -372,7 +377,7 @@ test "processFile with very long lines exceeding buffer size" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     // Should count all 3 lines correctly despite some being > 8192 bytes
     try std.testing.expectEqual(@as(usize, 3), stats.total_lines);
@@ -404,7 +409,7 @@ test "processFile with extremely long line (50KB)" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     // Should handle extremely long lines correctly
     try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
@@ -429,7 +434,7 @@ test "processFile with file ending without newline" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     // Both lines should be counted even though last one has no newline
     try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
@@ -462,7 +467,7 @@ test "processFile counts lines correctly with mixed lengths" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
-    const stats = try processFile(allocator, &db, test_file);
+    const stats = try processFile(allocator, &db, test_file, true);
 
     // All 5 lines should be counted correctly
     try std.testing.expectEqual(@as(usize, 5), stats.total_lines);
@@ -560,7 +565,7 @@ test "processFile fails with LineTooLong error for oversized line" {
     defer db.deinit();
 
     // Should fail with LineTooLong
-    const result = processFile(allocator, &db, test_file);
+    const result = processFile(allocator, &db, test_file, true);
     try std.testing.expectError(error.LineTooLong, result);
 }
 

@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
         "src/progress.zig",
         "src/database.zig",
         "src/processor.zig",
+        "src/parallel_processor.zig",
     };
 
     for (modules) |module_path| {
