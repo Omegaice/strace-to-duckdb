@@ -1,7 +1,9 @@
 const std = @import("std");
 const database = @import("database.zig");
 const processor = @import("processor.zig");
+const progress = @import("progress.zig");
 const Database = database.Database;
+const ProgressBar = progress.ProgressBar;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -73,28 +75,52 @@ pub fn main() !void {
     var total_parsed: usize = 0;
     var total_failed: usize = 0;
 
-    for (trace_files.items) |trace_file| {
+    // Create overall progress bar for files
+    const stdout = std.fs.File.stdout();
+    const show_overall = stdout.isTty();
+
+    if (show_overall) {
+        try std.fs.File.stdout().writeAll("Processing trace files...\n\n");
+    }
+
+    for (trace_files.items, 0..) |trace_file, idx| {
         // Check if file exists
         std.fs.cwd().access(trace_file, .{}) catch |err| {
             std.debug.print("Warning: Cannot access file '{s}': {}\n", .{ trace_file, err });
             continue;
         };
 
-        try std.fs.File.stdout().writeAll("Processing: ");
-        try std.fs.File.stdout().writeAll(trace_file);
-        try std.fs.File.stdout().writeAll("\n");
+        // Show overall progress
+        if (show_overall) {
+            std.debug.print("File {d}/{d}: {s}\n", .{
+                idx + 1,
+                trace_files.items.len,
+                trace_file,
+            });
+        } else {
+            try std.fs.File.stdout().writeAll("Processing: ");
+            try std.fs.File.stdout().writeAll(trace_file);
+            try std.fs.File.stdout().writeAll("\n");
+        }
 
         const stats = try processor.processFile(allocator, &db, trace_file);
 
-        std.debug.print("  Lines: {}, Parsed: {}, Failed: {}\n", .{
-            stats.total_lines,
-            stats.parsed_lines,
-            stats.failed_lines,
-        });
+        // Show stats for this file
+        if (!show_overall) {
+            std.debug.print("  Lines: {}, Parsed: {}, Failed: {}\n", .{
+                stats.total_lines,
+                stats.parsed_lines,
+                stats.failed_lines,
+            });
+        }
 
         total_lines += stats.total_lines;
         total_parsed += stats.parsed_lines;
         total_failed += stats.failed_lines;
+    }
+
+    if (show_overall) {
+        try std.fs.File.stdout().writeAll("\n");
     }
 
     // Print summary

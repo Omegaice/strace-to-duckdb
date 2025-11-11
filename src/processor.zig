@@ -1,7 +1,9 @@
 const std = @import("std");
 const parser = @import("parser.zig");
 const database = @import("database.zig");
+const progress = @import("progress.zig");
 const Database = database.Database;
+const ProgressBar = progress.ProgressBar;
 
 /// Statistics from processing a trace file
 pub const ProcessStats = struct {
@@ -53,11 +55,28 @@ pub fn processFile(
     const filename = std.fs.path.basename(file_path);
     const pid = extractPid(filename) orelse 0; // Default to 0 if no PID found
 
-    // Open file
+    // First pass: count total lines for accurate progress
+    var total_lines: usize = 0;
+    {
+        const file = try std.fs.cwd().openFile(file_path, .{});
+        defer file.close();
+
+        var count_buffer: [8192]u8 = undefined;
+        var count_reader = file.reader(&count_buffer);
+
+        while (count_reader.interface.takeDelimiter('\n') catch null) |_| {
+            total_lines += 1;
+        }
+    }
+
+    // Create progress bar with truncated filename
+    const short_name = if (filename.len > 30) filename[0..30] else filename;
+    var pbar = ProgressBar.init(short_name, total_lines);
+
+    // Second pass: process file with progress
     const file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
 
-    // Read file line by line using buffered reader
     var file_buffer: [8192]u8 = undefined;
     var reader = file.reader(&file_buffer);
 
@@ -72,6 +91,7 @@ pub fn processFile(
             // Parsing error - count as failed
             stats.failed_lines += 1;
             std.debug.print("Parse error on line {}: {}\n", .{ stats.total_lines, err });
+            try pbar.increment();
             continue;
         };
 
@@ -81,6 +101,7 @@ pub fn processFile(
                 // Database insert error
                 stats.failed_lines += 1;
                 std.debug.print("Insert error on line {}: {}\n", .{ stats.total_lines, err });
+                try pbar.increment();
                 continue;
             };
             stats.parsed_lines += 1;
@@ -88,7 +109,13 @@ pub fn processFile(
             // Line didn't match any pattern (comment, empty, etc.)
             // Don't count as failed - these are expected
         }
+
+        // Update progress
+        try pbar.increment();
     }
+
+    // Finish progress bar
+    try pbar.finish();
 
     return stats;
 }
