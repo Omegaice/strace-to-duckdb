@@ -88,7 +88,9 @@ fn parseRegular(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
     rest = std.mem.trimLeft(u8, rest, " ");
 
     // Check for error code (uppercase word followed by '(')
-    if (rest.len > 0 and rest[0] != '<') {
+    // Error codes ONLY appear when the syscall failed (return_value < 0)
+    const is_failure = if (return_value) |val| val < 0 else false;
+    if (is_failure and rest.len > 0 and rest[0] != '<') {
         // Should be error code
         const error_end = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
         error_code = rest[0..error_end];
@@ -235,7 +237,9 @@ fn parseResumed(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
     rest = std.mem.trimLeft(u8, rest, " ");
 
     // Check for error code
-    if (rest.len > 0 and rest[0] != '<') {
+    // Error codes ONLY appear when the syscall failed (return_value < 0)
+    const is_failure = if (return_value) |val| val < 0 else false;
+    if (is_failure and rest.len > 0 and rest[0] != '<') {
         const error_end = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
         error_code = rest[0..error_end];
         rest = std.mem.trimLeft(u8, rest[error_end..], " ");
@@ -417,4 +421,103 @@ test "parse garbage returns null" {
     const line = "!@#$%^&*()";
     const result = try parseLine(allocator, line);
     try std.testing.expectEqual(@as(?Syscall, null), result);
+}
+
+test "successful syscall with positive return value has no error code" {
+    const allocator = std.testing.allocator;
+    const line = "10:23:45.123456 read(3, \"data\", 100) = 100 <0.000050>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqual(@as(?i64, 100), syscall.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_code);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_message);
+}
+
+test "successful syscall returning zero has no error code" {
+    const allocator = std.testing.allocator;
+    const line = "10:23:45.123456 close(3) = 0 <0.000010>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqual(@as(?i64, 0), syscall.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_code);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_message);
+}
+
+test "poll with ready file descriptors shown after return value" {
+    const allocator = std.testing.allocator;
+    // poll() shows which FDs are ready: = 1 ([{fd=3, revents=POLLIN}])
+    const line = "10:23:45.123456 poll([{fd=3, events=POLLIN}], 1, -1) = 1 ([{fd=3, revents=POLLIN}]) <0.000100>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqualStrings("poll", syscall.syscall);
+    try std.testing.expectEqual(@as(?i64, 1), syscall.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_code);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_message);
+}
+
+test "select with ready file descriptors shown after return value" {
+    const allocator = std.testing.allocator;
+    // select() shows ready FDs: = 3 (in [5 6], out [7])
+    const line = "10:23:45.123456 select(10, [5 6 7], [7], NULL, NULL) = 3 (in [5 6], out [7]) <0.000150>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqualStrings("select", syscall.syscall);
+    try std.testing.expectEqual(@as(?i64, 3), syscall.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_code);
+}
+
+test "large positive return value has no error code" {
+    const allocator = std.testing.allocator;
+    const line = "10:23:45.123456 read(3, \"...\", 1048576) = 1048576 <0.001234>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqual(@as(?i64, 1048576), syscall.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), syscall.error_code);
+}
+
+test "only negative return values should have error codes" {
+    const allocator = std.testing.allocator;
+
+    // Success case (return 0) - no error
+    const success_line = "10:23:45.123456 close(3) = 0 <0.000010>";
+    const success = try parseLine(allocator, success_line);
+    try std.testing.expect(success != null);
+    try std.testing.expectEqual(@as(?i64, 0), success.?.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), success.?.error_code);
+
+    // Failure case (return -1) - has error
+    const fail_line = "10:23:45.123456 open(\"/tmp/missing\", O_RDONLY) = -1 ENOENT (No such file) <0.000042>";
+    const fail = try parseLine(allocator, fail_line);
+    try std.testing.expect(fail != null);
+    try std.testing.expectEqual(@as(?i64, -1), fail.?.return_value);
+    try std.testing.expectEqualStrings("ENOENT", fail.?.error_code.?);
+    try std.testing.expectEqualStrings("No such file", fail.?.error_message.?);
+}
+
+test "various successful syscall patterns have no error codes" {
+    const allocator = std.testing.allocator;
+
+    // getpid returns PID
+    const getpid_line = "10:23:45.123456 getpid() = 12345";
+    const getpid_result = try parseLine(allocator, getpid_line);
+    try std.testing.expect(getpid_result != null);
+    try std.testing.expectEqual(@as(?i64, 12345), getpid_result.?.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), getpid_result.?.error_code);
+
+    // write returns bytes written
+    const write_line = "10:23:45.123456 write(1, \"hello\", 5) = 5 <0.000020>";
+    const write_result = try parseLine(allocator, write_line);
+    try std.testing.expect(write_result != null);
+    try std.testing.expectEqual(@as(?i64, 5), write_result.?.return_value);
+    try std.testing.expectEqual(@as(?[]const u8, null), write_result.?.error_code);
 }
