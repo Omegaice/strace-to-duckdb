@@ -20,6 +20,42 @@ pub const ProcessStats = struct {
     }
 };
 
+/// Line counting statistics
+const LineStats = struct {
+    total_lines: usize,
+    max_line_length: usize,
+};
+
+/// Count total lines and find maximum line length in a file
+/// Returns error.LineTooLong if any line exceeds max_allowed bytes
+fn countLinesAndMaxLength(file_path: []const u8, max_allowed: usize) !LineStats {
+    var stats = LineStats{ .total_lines = 0, .max_line_length = 0 };
+
+    const file = try std.fs.cwd().openFile(file_path, .{});
+    defer file.close();
+
+    var count_buffer: [8192]u8 = undefined;
+    var count_reader = file.reader(&count_buffer);
+
+    while (true) {
+        const bytes_discarded = count_reader.interface.discardDelimiterInclusive('\n') catch break;
+        stats.total_lines += 1;
+        stats.max_line_length = @max(stats.max_line_length, bytes_discarded);
+
+        // Fail fast if line exceeds sanity limit
+        if (bytes_discarded > max_allowed) {
+            std.debug.print("Error: Line {} exceeds maximum allowed size of {} bytes ({} bytes)\n", .{
+                stats.total_lines,
+                max_allowed,
+                bytes_discarded,
+            });
+            return error.LineTooLong;
+        }
+    }
+
+    return stats;
+}
+
 /// Extract PID from trace filename
 /// Expected format: *.<pid> or *.trace.<pid>
 /// Returns null if no PID found
@@ -59,40 +95,29 @@ pub fn processFile(
     const MAX_LINE_SIZE: usize = 10 * 1024 * 1024;
 
     // First pass: count total lines and find maximum line length
-    var total_lines: usize = 0;
-    var max_line_length: usize = 0;
-    {
-        const file = try std.fs.cwd().openFile(file_path, .{});
-        defer file.close();
+    // Fails fast with error.LineTooLong if any line > 10MB
+    const line_stats = try countLinesAndMaxLength(file_path, MAX_LINE_SIZE);
 
-        var count_buffer: [8192]u8 = undefined;
-        var count_reader = file.reader(&count_buffer);
-
-        while (true) {
-            const bytes_discarded = count_reader.interface.discardDelimiterInclusive('\n') catch break;
-            total_lines += 1;
-            max_line_length = @max(max_line_length, bytes_discarded);
-        }
-    }
-
-    // Allocate buffer based on actual maximum line length (capped at 10MB)
+    // Allocate buffer based on actual maximum line length
     // Use at least 4KB to avoid tiny allocations for empty/small files
-    const buffer_size = @min(@max(max_line_length, 4096), MAX_LINE_SIZE);
+    const buffer_size = @max(line_stats.max_line_length, 4096);
     const line_buffer = try allocator.alloc(u8, buffer_size);
     defer allocator.free(line_buffer);
 
     // Create progress bar with truncated filename (keep it short to fit terminal width)
     const short_name = if (filename.len > 20) filename[0..20] else filename;
-    var pbar = ProgressBar.init(short_name, total_lines);
+    var pbar = ProgressBar.init(short_name, line_stats.total_lines);
 
     // Second pass: process file with progress
+    // Buffer is sized to max line length, so takeDelimiter should never fail with StreamTooLong
     const file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
 
     var reader = file.reader(line_buffer);
 
     while (reader.interface.takeDelimiter('\n') catch |err| {
-        std.debug.print("Read error: {}\n", .{err});
+        // Should not happen - buffer is sized correctly
+        std.debug.print("Unexpected read error: {}\n", .{err});
         return err;
     }) |line| {
         stats.total_lines += 1;
@@ -448,4 +473,111 @@ test "processFile counts lines correctly with mixed lengths" {
 
     const count = try db.getSyscallCount();
     try std.testing.expectEqual(@as(i64, 5), count);
+}
+
+test "countLinesAndMaxLength with normal file" {
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/count-test.7777";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    // Create file with known line lengths
+    try file.writeAll("short line\n"); // 11 bytes (10 + newline)
+    try file.writeAll("medium length line here\n"); // 24 bytes
+    try file.writeAll("x\n"); // 2 bytes
+    const long_line = "L" ** 5000;
+    try file.writeAll(long_line);
+    try file.writeAll("\n"); // 5001 bytes
+    file.close();
+
+    const stats = try countLinesAndMaxLength(test_file, 10 * 1024 * 1024);
+
+    try std.testing.expectEqual(@as(usize, 4), stats.total_lines);
+    try std.testing.expectEqual(@as(usize, 5001), stats.max_line_length);
+}
+
+test "countLinesAndMaxLength fails on line exceeding limit" {
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/toolong.8888";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    // Create file with line exceeding 1MB limit (using smaller limit for test speed)
+    try file.writeAll("normal line\n");
+    const huge_line = "X" ** (1024 * 1024 + 100); // Just over 1MB
+    try file.writeAll(huge_line);
+    try file.writeAll("\n");
+    file.close();
+
+    // Should fail with LineTooLong when limit is 1MB
+    const result = countLinesAndMaxLength(test_file, 1024 * 1024);
+    try std.testing.expectError(error.LineTooLong, result);
+}
+
+test "countLinesAndMaxLength handles exactly at limit" {
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/exactlimit.9999";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    // Create file with line exactly at limit (100KB for test speed)
+    const limit = 100 * 1024;
+    const exact_line = "E" ** (limit - 1); // -1 for newline
+    try file.writeAll(exact_line);
+    try file.writeAll("\n");
+    file.close();
+
+    // Should succeed - exactly at limit
+    const stats = try countLinesAndMaxLength(test_file, limit);
+
+    try std.testing.expectEqual(@as(usize, 1), stats.total_lines);
+    try std.testing.expectEqual(@as(usize, limit), stats.max_line_length);
+}
+
+test "processFile fails with LineTooLong error for oversized line" {
+    const allocator = std.testing.allocator;
+
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/process-toolong.1010";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    // Create file with valid line followed by line exceeding 10MB
+    try file.writeAll("10:23:45.123456 getpid() = 1234 <0.000010>\n");
+
+    // Write an 11MB line (this will be slow, but validates the real limit)
+    const huge_line = "Z" ** (11 * 1024 * 1024);
+    try file.writeAll(huge_line);
+    try file.writeAll("\n");
+    file.close();
+
+    var db = try Database.init(":memory:");
+    defer db.deinit();
+
+    // Should fail with LineTooLong
+    const result = processFile(allocator, &db, test_file);
+    try std.testing.expectError(error.LineTooLong, result);
+}
+
+test "countLinesAndMaxLength with empty file" {
+    const test_dir = "zig-cache/test-traces";
+    try std.fs.cwd().makePath(test_dir);
+
+    const test_file = "zig-cache/test-traces/empty-count.1111";
+    const file = try std.fs.cwd().createFile(test_file, .{});
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+    file.close();
+
+    const stats = try countLinesAndMaxLength(test_file, 10 * 1024 * 1024);
+
+    try std.testing.expectEqual(@as(usize, 0), stats.total_lines);
+    try std.testing.expectEqual(@as(usize, 0), stats.max_line_length);
 }
