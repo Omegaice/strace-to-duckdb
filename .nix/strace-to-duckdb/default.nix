@@ -1,7 +1,8 @@
-{ lib
-, stdenv
-, zig
-, duckdb
+{
+  lib,
+  stdenv,
+  zig,
+  duckdb,
 }:
 
 stdenv.mkDerivation {
