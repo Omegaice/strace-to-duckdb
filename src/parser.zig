@@ -209,12 +209,12 @@ fn parseResumed(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
     // Find syscall name (ends with ' resumed>')
     const resumed_pos = std.mem.indexOf(u8, rest, " resumed>") orelse return null;
     const syscall = rest[0..resumed_pos];
-    rest = rest[resumed_pos + 9..]; // skip ' resumed>'
+    rest = rest[resumed_pos + 9 ..]; // skip ' resumed>'
 
     // Find args (everything before ') = ')
     const args_end = std.mem.indexOf(u8, rest, ") = ") orelse return null;
     const args = rest[0..args_end];
-    rest = rest[args_end + 4..]; // skip ') = '
+    rest = rest[args_end + 4 ..]; // skip ') = '
 
     // Parse return value
     var return_value: ?i64 = null;
@@ -247,7 +247,7 @@ fn parseResumed(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
         if (rest.len > 0 and rest[0] == '(') {
             const msg_end = std.mem.indexOfScalar(u8, rest, ')') orelse return null;
             error_message = rest[1..msg_end];
-            rest = rest[msg_end + 1..];
+            rest = rest[msg_end + 1 ..];
             rest = std.mem.trimLeft(u8, rest, " ");
         }
     }
