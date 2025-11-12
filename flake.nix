@@ -1,5 +1,5 @@
 {
-  description = "Description for the project";
+  description = "High-performance tool for parsing strace output and loading into DuckDB";
 
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
@@ -22,14 +22,10 @@
         # module parameters provide easy access to attributes of the same
         # system.
 
-        # Equivalent to  inputs'.nixpkgs.legacyPackages.hello;
-        packages.default = pkgs.hello;
+        packages.default = pkgs.callPackage ./.nix/strace-to-duckdb { };
 
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            zig
-            duckdb
-          ];
+          inputsFrom = [ self'.packages.default ];
         };
       };
       flake = {
