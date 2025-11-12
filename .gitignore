@@ -11,3 +11,8 @@ docgen_tmp/
 ### Nix ###
 .direnv
 result/
+
+### DuckDB ###
+*.db
+*.db.wal
+*.db.tmp
