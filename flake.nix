@@ -30,15 +30,17 @@
           ...
         }:
         {
-        # Per-system attributes can be defined here. The self' and inputs'
-        # module parameters provide easy access to attributes of the same
-        # system.
+          # Per-system attributes can be defined here. The self' and inputs'
+          # module parameters provide easy access to attributes of the same
+          # system.
 
-        packages.default = pkgs.callPackage ./.nix/strace-to-duckdb { };
+          packages.default = pkgs.callPackage ./.nix/strace-to-duckdb { };
 
-        devShells.default = pkgs.mkShell {
-          inputsFrom = [ self'.packages.default ];
-        };
+          checks.default = self'.packages.default;
+
+          devShells.default = pkgs.mkShell {
+            inputsFrom = [ self'.packages.default ];
+          };
 
           # Formatting configuration
           treefmt = {
@@ -46,6 +48,6 @@
             programs.zig.enable = true;
             programs.nixfmt.enable = true;
           };
-      };
+        };
     };
 }

@@ -22,12 +22,22 @@ stdenv.mkDerivation {
   # Zig cache and global cache directories
   XDG_CACHE_HOME = ".cache";
 
+  doCheck = true;
+
   buildPhase = ''
     runHook preBuild
 
     zig build -Doptimize=ReleaseSafe
 
     runHook postBuild
+  '';
+
+  checkPhase = ''
+    runHook preCheck
+
+    zig build test --summary all
+
+    runHook postCheck
   '';
 
   installPhase = ''
