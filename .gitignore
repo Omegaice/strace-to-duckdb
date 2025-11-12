@@ -11,6 +11,7 @@ docgen_tmp/
 ### Nix ###
 .direnv
 result/
+.pre-commit-config.yaml
 
 ### DuckDB ###
 *.db

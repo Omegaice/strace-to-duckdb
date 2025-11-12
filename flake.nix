@@ -6,6 +6,8 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
+    git-hooks-nix.url = "github:cachix/git-hooks.nix";
+    git-hooks-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -13,6 +15,7 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.treefmt-nix.flakeModule
+        inputs.git-hooks-nix.flakeModule
       ];
       systems = [
         "x86_64-linux"
@@ -39,7 +42,10 @@
           checks.default = self'.packages.default;
 
           devShells.default = pkgs.mkShell {
-            inputsFrom = [ self'.packages.default ];
+            inputsFrom = [
+              self'.packages.default
+              config.pre-commit.devShell
+            ];
           };
 
           # Formatting configuration
@@ -47,6 +53,11 @@
             projectRootFile = "flake.nix";
             programs.zig.enable = true;
             programs.nixfmt.enable = true;
+          };
+
+          # Pre-commit hooks configuration
+          pre-commit.settings.hooks = {
+            treefmt.enable = true;
           };
         };
     };
