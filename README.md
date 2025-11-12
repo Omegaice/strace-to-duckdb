@@ -1,5 +1,7 @@
 # strace-to-duckdb
 
+[![CI](https://github.com/omegaice/strace-to-duckdb/workflows/CI/badge.svg)](https://github.com/omegaice/strace-to-duckdb/actions)
+
 A high-performance tool for parsing strace output files and loading them into a DuckDB database for analysis. Written in Zig for speed and efficiency.
 
 ## Features
