@@ -5,6 +5,32 @@ const Syscall = types.Syscall;
 /// Result of parsing a line - either a syscall or null if unparseable
 pub const ParseResult = ?Syscall;
 
+/// Result of timestamp extraction
+const TimestampResult = struct {
+    timestamp: []const u8,
+    rest_start: usize,
+};
+
+/// Extract timestamp from the beginning of a line
+/// Returns timestamp and position where the rest of the line starts
+fn extractTimestamp(line: []const u8) ?TimestampResult {
+    var i: usize = 0;
+    var dots: usize = 0;
+    var colons: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (c == ':') colons += 1;
+        if (c == '.') dots += 1;
+        if (c == ' ' and colons >= 2 and dots >= 1) {
+            return TimestampResult{
+                .timestamp = line[0..i],
+                .rest_start = i,
+            };
+        }
+    }
+    return null;
+}
+
 /// Find the position of closing ')' that matches the opening '('
 /// This handles nested parentheses in syscall arguments
 /// Starts with depth 1 (assumes we already passed the opening '(')
@@ -39,18 +65,23 @@ pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !ParseResult {
         return null;
     }
 
+    // Extract timestamp ONCE - all strace lines start with a timestamp
+    const ts_result = extractTimestamp(trimmed) orelse return null;
+    const timestamp = ts_result.timestamp;
+    const rest = std.mem.trimLeft(u8, trimmed[ts_result.rest_start..], " ");
+
     // Try regular pattern first
-    if (try parseRegular(allocator, trimmed)) |syscall| {
+    if (try parseRegularWithTimestamp(allocator, timestamp, rest)) |syscall| {
         return syscall;
     }
 
     // Try unfinished pattern
-    if (try parseUnfinished(allocator, trimmed)) |syscall| {
+    if (try parseUnfinishedWithTimestamp(allocator, timestamp, rest)) |syscall| {
         return syscall;
     }
 
     // Try resumed pattern
-    if (try parseResumed(allocator, trimmed)) |syscall| {
+    if (try parseResumedWithTimestamp(allocator, timestamp, rest)) |syscall| {
         return syscall;
     }
 
@@ -59,8 +90,9 @@ pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !ParseResult {
 }
 
 /// Parse regular syscall format:
-/// HH:MM:SS.microseconds syscall(args) = return_value [ERROR (msg)] <duration>
-fn parseRegular(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
+/// syscall(args) = return_value [ERROR (msg)] <duration>
+/// Timestamp is pre-extracted and passed in
+fn parseRegularWithTimestamp(allocator: std.mem.Allocator, timestamp: []const u8, line: []const u8) !?Syscall {
     _ = allocator;
 
     // Skip lines with <unfinished ...> - those should be parsed by parseUnfinished
@@ -68,22 +100,7 @@ fn parseRegular(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
         return null;
     }
 
-    // Find timestamp (format: HH:MM:SS.microseconds)
-    const timestamp_end = blk: {
-        var i: usize = 0;
-        var dots: usize = 0;
-        var colons: usize = 0;
-        while (i < line.len) : (i += 1) {
-            const c = line[i];
-            if (c == ':') colons += 1;
-            if (c == '.') dots += 1;
-            if (c == ' ' and colons >= 2 and dots >= 1) break :blk i;
-        }
-        return null;
-    };
-
-    const timestamp = line[0..timestamp_end];
-    var rest = std.mem.trimLeft(u8, line[timestamp_end..], " ");
+    var rest = line;
 
     // Find syscall name (ends with '(')
     const syscall_end = std.mem.indexOfScalar(u8, rest, '(') orelse return null;
@@ -161,8 +178,9 @@ fn parseRegular(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
 }
 
 /// Parse unfinished syscall format:
-/// HH:MM:SS.microseconds syscall(args <unfinished ...>
-fn parseUnfinished(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
+/// syscall(args <unfinished ...>
+/// Timestamp is pre-extracted and passed in
+fn parseUnfinishedWithTimestamp(allocator: std.mem.Allocator, timestamp: []const u8, line: []const u8) !?Syscall {
     _ = allocator;
 
     // Check for "<unfinished ...>"
@@ -170,22 +188,7 @@ fn parseUnfinished(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
         return null;
     }
 
-    // Find timestamp
-    const timestamp_end = blk: {
-        var i: usize = 0;
-        var dots: usize = 0;
-        var colons: usize = 0;
-        while (i < line.len) : (i += 1) {
-            const c = line[i];
-            if (c == ':') colons += 1;
-            if (c == '.') dots += 1;
-            if (c == ' ' and colons >= 2 and dots >= 1) break :blk i;
-        }
-        return null;
-    };
-
-    const timestamp = line[0..timestamp_end];
-    var rest = std.mem.trimLeft(u8, line[timestamp_end..], " ");
+    var rest = line;
 
     // Find syscall name
     const syscall_end = std.mem.indexOfScalar(u8, rest, '(') orelse return null;
@@ -211,8 +214,9 @@ fn parseUnfinished(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
 }
 
 /// Parse resumed syscall format:
-/// HH:MM:SS.microseconds <... syscall resumed>args) = return_value [ERROR (msg)] <duration>
-fn parseResumed(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
+/// <... syscall resumed>args) = return_value [ERROR (msg)] <duration>
+/// Timestamp is pre-extracted and passed in
+fn parseResumedWithTimestamp(allocator: std.mem.Allocator, timestamp: []const u8, line: []const u8) !?Syscall {
     _ = allocator;
 
     // Check for "<... " and " resumed>"
@@ -220,22 +224,7 @@ fn parseResumed(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
         return null;
     }
 
-    // Find timestamp
-    const timestamp_end = blk: {
-        var i: usize = 0;
-        var dots: usize = 0;
-        var colons: usize = 0;
-        while (i < line.len) : (i += 1) {
-            const c = line[i];
-            if (c == ':') colons += 1;
-            if (c == '.') dots += 1;
-            if (c == ' ' and colons >= 2 and dots >= 1) break :blk i;
-        }
-        return null;
-    };
-
-    const timestamp = line[0..timestamp_end];
-    var rest = std.mem.trimLeft(u8, line[timestamp_end..], " ");
+    var rest = line;
 
     // Skip "<... "
     if (!std.mem.startsWith(u8, rest, "<... ")) return null;
