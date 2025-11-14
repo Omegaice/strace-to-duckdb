@@ -1,10 +1,7 @@
 const std = @import("std");
 const database = @import("database.zig");
-const processor = @import("processor.zig");
 const parallel_processor = @import("parallel_processor.zig");
-const progress = @import("progress.zig");
 const Database = database.Database;
-const ProgressBar = progress.ProgressBar;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -22,7 +19,6 @@ pub fn main() !void {
 
     // Default output database
     var output_db: []const u8 = "strace.db";
-    var use_sequential = false;
     var trace_files = std.ArrayListUnmanaged([]const u8){};
     defer trace_files.deinit(allocator);
 
@@ -39,8 +35,6 @@ pub fn main() !void {
                 std.process.exit(1);
             }
             output_db = args[i];
-        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--sequential")) {
-            use_sequential = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage(args[0]);
             std.process.exit(0);
@@ -74,59 +68,25 @@ pub fn main() !void {
 
     try std.fs.File.stdout().writeAll("Database created successfully\n\n");
 
-    var total_lines: usize = 0;
-    var total_parsed: usize = 0;
-    var total_failed: usize = 0;
-    var files_processed: usize = 0;
+    // Always use parallel processing (automatically uses 1 worker for single file)
+    const num_workers = @max(1, @min(try std.Thread.getCpuCount(), trace_files.items.len));
+    try std.fs.File.stdout().writeAll("Processing trace files...\n\n");
 
-    if (use_sequential) {
-        // Sequential processing
-        try std.fs.File.stdout().writeAll("Processing trace files sequentially...\n\n");
+    const stats = try parallel_processor.processFilesParallel(
+        allocator,
+        &db,
+        trace_files.items,
+        num_workers,
+    );
 
-        // Begin appender once for all files
-        try db.beginAppend();
-        defer db.endAppend() catch {};
-
-        for (trace_files.items) |trace_file| {
-            // Check if file exists
-            std.fs.cwd().access(trace_file, .{}) catch |err| {
-                std.debug.print("Warning: Cannot access file '{s}': {}\n", .{ trace_file, err });
-                continue;
-            };
-
-            const stats = try processor.processFile(allocator, &db, trace_file, true);
-
-            total_lines += stats.total_lines;
-            total_parsed += stats.parsed_lines;
-            total_failed += stats.failed_lines;
-            files_processed += 1;
-        }
-    } else {
-        // Parallel processing
-        const num_workers = @max(1, try std.Thread.getCpuCount());
-        try std.fs.File.stdout().writeAll("Processing trace files in parallel...\n\n");
-
-        const par_stats = try parallel_processor.processFilesParallel(
-            allocator,
-            &db,
-            trace_files.items,
-            num_workers,
-        );
-
-        try std.fs.File.stdout().writeAll("\n");
-
-        total_lines = par_stats.total_lines;
-        total_parsed = par_stats.parsed_lines;
-        total_failed = par_stats.failed_lines;
-        files_processed = par_stats.files_processed;
-    }
+    try std.fs.File.stdout().writeAll("\n");
 
     // Print summary
     try std.fs.File.stdout().writeAll("\n=== Summary ===\n");
-    std.debug.print("Files processed: {}/{}\n", .{ files_processed, trace_files.items.len });
-    std.debug.print("Total lines: {}\n", .{total_lines});
-    std.debug.print("Total syscalls parsed: {}\n", .{total_parsed});
-    std.debug.print("Total failed lines: {}\n", .{total_failed});
+    std.debug.print("Files processed: {}/{}\n", .{ stats.files_processed, trace_files.items.len });
+    std.debug.print("Total lines: {}\n", .{stats.total_lines});
+    std.debug.print("Total syscalls parsed: {}\n", .{stats.parsed_lines});
+    std.debug.print("Total failed lines: {}\n", .{stats.failed_lines});
     std.debug.print("Database: {s}\n", .{output_db});
 
     // Database statistics
@@ -154,13 +114,12 @@ fn printUsage(program_name: []const u8) !void {
         \\
         \\Options:
         \\  -o, --output <file>  Output database file (default: strace.db)
-        \\  -s, --sequential     Use sequential processing (default: parallel)
         \\  -h, --help           Show this help message
         \\
         \\Examples:
         \\  {s} trace.1234 trace.5678
         \\  {s} -o output.db trace.*
-        \\  {s} --sequential --output mydata.db strace-*.log
+        \\  {s} --output mydata.db strace-*.log
         \\
     ;
 
