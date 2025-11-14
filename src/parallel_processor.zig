@@ -49,6 +49,11 @@ const WorkerContext = struct {
         var db = try Database.connectToInstance(db_instance);
         defer db.deinit();
 
+        // Begin appender ONCE for all files this worker will process
+        // This reduces flush overhead from O(files) to O(workers)
+        try db.beginAppend();
+        defer db.endAppend() catch {}; // Always flush at end, even on error
+
         // Process assigned files using round-robin distribution
         // Worker 0 gets files 0, num_workers, 2*num_workers, ...
         // Worker 1 gets files 1, num_workers+1, 2*num_workers+1, ...
@@ -259,6 +264,8 @@ test "parallel processing produces same results as sequential" {
     var db_seq = try Database.init(db_seq_path);
     defer db_seq.deinit();
 
+    try db_seq.beginAppend();
+
     var seq_stats = processor.ProcessStats.init();
     for (file_list.items) |file_path| {
         const stats = try processor.processFile(allocator, &db_seq, file_path, false);
@@ -266,6 +273,8 @@ test "parallel processing produces same results as sequential" {
         seq_stats.parsed_lines += stats.parsed_lines;
         seq_stats.failed_lines += stats.failed_lines;
     }
+
+    try db_seq.endAppend();
 
     // Process in parallel
     const db_par_path = try std.fmt.allocPrint(allocator, "{s}/parallel.db", .{test_dir});

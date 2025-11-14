@@ -62,6 +62,16 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run micro-benchmarks");
     bench_step.dependOn(&bench_cmd.step);
 
+    // End-to-end benchmark using hyperfine
+    const e2e_bench_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/e2e-bench.sh",
+    });
+    e2e_bench_cmd.step.dependOn(b.getInstallStep());
+
+    const e2e_bench_step = b.step("e2e-bench", "Run end-to-end benchmark with hyperfine");
+    e2e_bench_step.dependOn(&e2e_bench_cmd.step);
+
     // Test configuration
     const test_step = b.step("test", "Run all tests");
 

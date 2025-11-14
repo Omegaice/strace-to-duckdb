@@ -46,6 +46,15 @@
               self'.packages.default
               config.pre-commit.devShell
             ];
+            packages = with pkgs; [
+              # Profiling tools
+              linuxPackages.perf
+              flamegraph
+              hotspot
+              valgrind
+              # Benchmarking tools
+              hyperfine
+            ];
           };
 
           # Formatting configuration

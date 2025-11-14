@@ -83,6 +83,10 @@ pub fn main() !void {
         // Sequential processing
         try std.fs.File.stdout().writeAll("Processing trace files sequentially...\n\n");
 
+        // Begin appender once for all files
+        try db.beginAppend();
+        defer db.endAppend() catch {};
+
         for (trace_files.items) |trace_file| {
             // Check if file exists
             std.fs.cwd().access(trace_file, .{}) catch |err| {

@@ -113,9 +113,8 @@ pub fn processFile(
     }
     defer pbar.deinit(); // Automatically finish progress bar on return
 
-    // Begin bulk appending for much faster inserts
-    try db.beginAppend();
-    defer db.endAppend() catch {}; // Always end appender, even on error
+    // NOTE: Caller must call db.beginAppend() before calling this function
+    // and db.endAppend() after processing all files
 
     // Second pass: process file with progress
     // Buffer is sized to max line length, so takeDelimiter should never fail with StreamTooLong
@@ -217,8 +216,13 @@ test "processFile with valid trace data" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     // Process the file
     const stats = try processFile(allocator, &db, test_file, true);
+
+    // Flush appender before querying
+    try db.endAppend();
 
     // Verify statistics
     try std.testing.expectEqual(@as(usize, 7), stats.total_lines); // 7 lines total
@@ -247,7 +251,11 @@ test "processFile with empty file" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     try std.testing.expectEqual(@as(usize, 0), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 0), stats.parsed_lines);
@@ -279,7 +287,11 @@ test "processFile with only invalid lines" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     try std.testing.expectEqual(@as(usize, 5), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 0), stats.parsed_lines);
@@ -308,7 +320,11 @@ test "processFile with syscall errors" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 2), stats.parsed_lines);
@@ -342,7 +358,11 @@ test "processFile with unfinished and resumed syscalls" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     try std.testing.expectEqual(@as(usize, 3), stats.total_lines);
     try std.testing.expectEqual(@as(usize, 3), stats.parsed_lines);
@@ -377,7 +397,11 @@ test "processFile with very long lines exceeding buffer size" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     // Should count all 3 lines correctly despite some being > 8192 bytes
     try std.testing.expectEqual(@as(usize, 3), stats.total_lines);
@@ -409,7 +433,11 @@ test "processFile with extremely long line (50KB)" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     // Should handle extremely long lines correctly
     try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
@@ -434,7 +462,11 @@ test "processFile with file ending without newline" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     // Both lines should be counted even though last one has no newline
     try std.testing.expectEqual(@as(usize, 2), stats.total_lines);
@@ -467,7 +499,11 @@ test "processFile counts lines correctly with mixed lengths" {
     var db = try Database.init(":memory:");
     defer db.deinit();
 
+    try db.beginAppend();
+
     const stats = try processFile(allocator, &db, test_file, true);
+
+    try db.endAppend();
 
     // All 5 lines should be counted correctly
     try std.testing.expectEqual(@as(usize, 5), stats.total_lines);
