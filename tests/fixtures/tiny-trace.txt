@@ -1,0 +1,10 @@
+22:21:11.524157 execve("/etc/profiles/per-user/omegaice/bin/zoom", ["zoom"], 0x7ffeec7c3190 /* 166 vars */) = 0 <0.000200>
+22:21:11.524449 brk(NULL)               = 0x55edad95f000 <0.000004>
+22:21:11.524490 mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7fbf0971b000 <0.000007>
+22:21:11.524519 access("/etc/ld-nix.so.preload", R_OK) = -1 ENOENT (No such file or directory) <0.000030>
+22:21:11.524611 openat(AT_FDCWD, "/nix/store/ga8daf4c0airy2v5akmg3lcv5saik7nf-pipewire-1.4.9-jack/lib/glibc-hwcaps/x86-64-v4/libdl.so.2", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000009>
+22:21:11.524646 newfstatat(AT_FDCWD, "/nix/store/ga8daf4c0airy2v5akmg3lcv5saik7nf-pipewire-1.4.9-jack/lib/glibc-hwcaps/x86-64-v4/", 0x7ffe67710830, 0) = -1 ENOENT (No such file or directory) <0.000005>
+22:21:11.524673 openat(AT_FDCWD, "/nix/store/ga8daf4c0airy2v5akmg3lcv5saik7nf-pipewire-1.4.9-jack/lib/glibc-hwcaps/x86-64-v3/libdl.so.2", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000005>
+22:21:11.524702 newfstatat(AT_FDCWD, "/nix/store/ga8daf4c0airy2v5akmg3lcv5saik7nf-pipewire-1.4.9-jack/lib/glibc-hwcaps/x86-64-v3/", 0x7ffe67710830, 0) = -1 ENOENT (No such file or directory) <0.000005>
+22:21:11.524724 openat(AT_FDCWD, "/nix/store/ga8daf4c0airy2v5akmg3lcv5saik7nf-pipewire-1.4.9-jack/lib/glibc-hwcaps/x86-64-v2/libdl.so.2", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory) <0.000005>
+22:21:11.524745 newfstatat(AT_FDCWD, "/nix/store/ga8daf4c0airy2v5akmg3lcv5saik7nf-pipewire-1.4.9-jack/lib/glibc-hwcaps/x86-64-v2/", 0x7ffe67710830, 0) = -1 ENOENT (No such file or directory) <0.000005>

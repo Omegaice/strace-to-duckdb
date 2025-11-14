@@ -1,0 +1,13 @@
+
+### Nix ###
+.direnv
+result/
+.pre-commit-config.yaml
+
+### DuckDB ###
+*.db
+*.db.wal
+*.db.tmp
+
+### Rust ###
+/target
