@@ -2,9 +2,6 @@ const std = @import("std");
 const types = @import("types.zig");
 const Syscall = types.Syscall;
 
-/// Result of parsing a line - either a syscall or null if unparseable
-pub const ParseResult = ?Syscall;
-
 /// Result of timestamp extraction
 const TimestampResult = struct {
     timestamp: []const u8,
@@ -57,7 +54,7 @@ fn findClosingParen(line: []const u8) ?usize {
 
 /// Parse a single line of strace output
 /// Caller owns the returned Syscall strings (they reference the input line)
-pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !ParseResult {
+pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
 
     // Empty line

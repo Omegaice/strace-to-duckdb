@@ -1,9 +1,7 @@
 const std = @import("std");
 const parser = @import("parser.zig");
 const database = @import("database.zig");
-const progress = @import("progress.zig");
 const Database = database.Database;
-const ProgressBar = progress.ProgressBar;
 
 /// Statistics from processing a trace file
 pub const ProcessStats = struct {
@@ -80,12 +78,10 @@ pub fn extractPid(filename: []const u8) ?i32 {
 
 /// Process a single strace trace file
 /// Returns statistics about the processing
-/// If show_progress is false, no per-file progress bar will be displayed (useful for parallel processing)
 pub fn processFile(
     allocator: std.mem.Allocator,
     db: *Database,
     file_path: []const u8,
-    show_progress: bool,
 ) !ProcessStats {
     var stats = ProcessStats.init();
 
@@ -106,17 +102,10 @@ pub fn processFile(
     const line_buffer = try allocator.alloc(u8, buffer_size);
     defer allocator.free(line_buffer);
 
-    // Create progress bar only if requested
-    var pbar = ProgressBar.init(filename, line_stats.total_lines);
-    if (!show_progress) {
-        pbar.enabled = false;
-    }
-    defer pbar.deinit(); // Automatically finish progress bar on return
-
     // NOTE: Caller must call db.beginAppend() before calling this function
     // and db.endAppend() after processing all files
 
-    // Second pass: process file with progress
+    // Second pass: process file
     // Buffer is sized to max line length, so takeDelimiter should never fail with StreamTooLong
     const file = try std.fs.cwd().openFile(file_path, .{});
     defer file.close();
@@ -128,7 +117,6 @@ pub fn processFile(
         std.debug.print("Unexpected read error: {}\n", .{err});
         return err;
     }) |line| {
-        defer pbar.increment() catch {}; // Always increment progress, even on continue
         stats.total_lines += 1;
 
         // Parse the line
@@ -219,7 +207,7 @@ test "processFile with valid trace data" {
     try db.beginAppend();
 
     // Process the file
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     // Flush appender before querying
     try db.endAppend();
@@ -253,7 +241,7 @@ test "processFile with empty file" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -289,7 +277,7 @@ test "processFile with only invalid lines" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -322,7 +310,7 @@ test "processFile with syscall errors" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -360,7 +348,7 @@ test "processFile with unfinished and resumed syscalls" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -399,7 +387,7 @@ test "processFile with very long lines exceeding buffer size" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -435,7 +423,7 @@ test "processFile with extremely long line (50KB)" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -464,7 +452,7 @@ test "processFile with file ending without newline" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -501,7 +489,7 @@ test "processFile counts lines correctly with mixed lengths" {
 
     try db.beginAppend();
 
-    const stats = try processFile(allocator, &db, test_file, true);
+    const stats = try processFile(allocator, &db, test_file);
 
     try db.endAppend();
 
@@ -601,7 +589,7 @@ test "processFile fails with LineTooLong error for oversized line" {
     defer db.deinit();
 
     // Should fail with LineTooLong
-    const result = processFile(allocator, &db, test_file, true);
+    const result = processFile(allocator, &db, test_file);
     try std.testing.expectError(error.LineTooLong, result);
 }
 

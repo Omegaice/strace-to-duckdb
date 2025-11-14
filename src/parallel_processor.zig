@@ -62,7 +62,7 @@ const WorkerContext = struct {
             const file_path = self.files[i];
 
             // Process the file (disable per-file progress in parallel mode)
-            const stats = processor.processFile(self.allocator, &db, file_path, false) catch |err| {
+            const stats = processor.processFile(self.allocator, &db, file_path) catch |err| {
                 // File processing failed, increment error counter
                 _ = self.files_with_errors.fetchAdd(1, .seq_cst);
                 // Store error for debugging (overwrites previous errors)
@@ -268,7 +268,7 @@ test "parallel processing produces same results as sequential" {
 
     var seq_stats = processor.ProcessStats.init();
     for (file_list.items) |file_path| {
-        const stats = try processor.processFile(allocator, &db_seq, file_path, false);
+        const stats = try processor.processFile(allocator, &db_seq, file_path);
         seq_stats.total_lines += stats.total_lines;
         seq_stats.parsed_lines += stats.parsed_lines;
         seq_stats.failed_lines += stats.failed_lines;

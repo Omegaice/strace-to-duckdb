@@ -51,13 +51,6 @@ pub const Database = struct {
         };
     }
 
-    /// Open an existing database without creating schema
-    /// Used by worker threads to connect to an already-initialized database
-    /// DEPRECATED: Use connectToInstance() instead for proper concurrency
-    pub fn openExisting(path: []const u8) !Database {
-        return Database.open(path);
-    }
-
     /// Internal: Open database connection
     fn open(path: []const u8) !Database {
         var db: c.duckdb_database = undefined;
@@ -250,15 +243,6 @@ pub const Database = struct {
         // End the row
         if (c.duckdb_appender_end_row(appender) == c.DuckDBError) {
             return error.AppendFailed;
-        }
-    }
-
-    /// Flush the appender to commit all pending rows
-    pub fn flushAppend(self: *Database) !void {
-        const appender = self.appender orelse return error.AppenderNotInitialized;
-
-        if (c.duckdb_appender_flush(appender) == c.DuckDBError) {
-            return error.AppenderFlushFailed;
         }
     }
 
@@ -743,57 +727,6 @@ test "appender with unfinished and resumed syscalls" {
 
     const count = try db.getSyscallCount();
     try std.testing.expectEqual(@as(i64, 2), count);
-}
-
-test "appender multiple batches with flush" {
-    var db = try Database.init(":memory:");
-    defer db.deinit();
-
-    try db.beginAppend();
-
-    // First batch
-    for (0..100) |i| {
-        const syscall = Syscall.init(
-            "10:00:00.000001",
-            "getpid",
-            "",
-            @intCast(i),
-            null,
-            null,
-            null,
-            false,
-            false,
-        );
-        try db.appendSyscall("test.trace", 1234, syscall);
-    }
-
-    // Flush intermediate
-    try db.flushAppend();
-
-    // Second batch
-    for (0..100) |i| {
-        const syscall = Syscall.init(
-            "10:00:00.000002",
-            "write",
-            "1, \"test\", 4",
-            4,
-            null,
-            null,
-            null,
-            false,
-            false,
-        );
-        try db.appendSyscall("test.trace", @intCast(5000 + i), syscall);
-    }
-
-    try db.endAppend();
-
-    // Verify all 200 were inserted
-    const count = try db.getSyscallCount();
-    try std.testing.expectEqual(@as(i64, 200), count);
-
-    const pid_count = try db.getUniquePidCount();
-    try std.testing.expectEqual(@as(i64, 101), pid_count); // 1234 + 100 unique PIDs
 }
 
 test "appender error without beginAppend" {
