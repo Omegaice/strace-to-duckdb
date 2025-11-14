@@ -1,6 +1,6 @@
 const std = @import("std");
 const database = @import("database.zig");
-const parallel_processor = @import("parallel_processor.zig");
+const worker_pool = @import("worker_pool.zig");
 const Database = database.Database;
 
 pub fn main() !void {
@@ -72,7 +72,7 @@ pub fn main() !void {
     const num_workers = @max(1, @min(try std.Thread.getCpuCount(), trace_files.items.len));
     try std.fs.File.stdout().writeAll("Processing trace files...\n\n");
 
-    const stats = try parallel_processor.processFilesParallel(
+    const stats = try worker_pool.processFilesParallel(
         allocator,
         &db,
         trace_files.items,

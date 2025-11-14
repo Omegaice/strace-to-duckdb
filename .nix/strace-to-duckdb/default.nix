@@ -5,49 +5,34 @@
   duckdb,
 }:
 
-stdenv.mkDerivation {
+stdenv.mkDerivation (finalAttrs: {
   pname = "strace-to-duckdb";
   version = "0.1.0";
 
   src = ../..;
 
   nativeBuildInputs = [
-    zig
+    zig.hook
   ];
 
   buildInputs = [
     duckdb
   ];
 
-  # Zig cache and global cache directories
-  XDG_CACHE_HOME = ".cache";
-
-  doCheck = true;
-
-  buildPhase = ''
-    runHook preBuild
-
-    zig build -Doptimize=ReleaseSafe
-
-    runHook postBuild
-  '';
-
-  checkPhase = ''
-    runHook preCheck
-
-    zig build test --summary all
-
-    runHook postCheck
-  '';
-
-  installPhase = ''
-    runHook preInstall
-
-    mkdir -p $out/bin
-    cp zig-out/bin/strace-to-duckdb $out/bin/
-
-    runHook postInstall
-  '';
+  postUnpack =
+    let
+      deps = zig.fetchDeps {
+        inherit (finalAttrs)
+          src
+          pname
+          version
+          ;
+        hash = "sha256-KJHK6mQNohtaF2G7sWqLiFxGyRFbwMqYDk5sWFg1m3s=";
+      };
+    in
+    ''
+      ln -s ${deps} $ZIG_GLOBAL_CACHE_DIR/p
+    '';
 
   meta = with lib; {
     description = "High-performance tool for parsing strace output and loading into DuckDB";
@@ -57,4 +42,4 @@ stdenv.mkDerivation {
     platforms = platforms.unix;
     mainProgram = "strace-to-duckdb";
   };
-}
+})

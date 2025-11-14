@@ -1,12 +1,17 @@
 .{
-    .name = .master,
-    .version = "0.15.2",
+    .name = .strace_to_duckdb,
+    .version = "0.1.0",
     .dependencies = .{
         .zbench = .{
             .url = "https://github.com/hendriknielaender/zBench/archive/refs/heads/main.tar.gz",
             .hash = "zbench-0.11.2-YTdc7zolAQDlBF9i0ywXIvDjafL3Kg27S-aFUq6dU5zy",
         },
     },
-    .paths = .{""},
-    .fingerprint = 0x2d09a3d6696d7d7f,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "bench",
+    },
+    .fingerprint = 0x6473979d4cc6a7c5,
 }

@@ -37,3 +37,39 @@ pub const Syscall = struct {
         };
     }
 };
+
+/// Statistics from processing a single trace file
+pub const FileStats = struct {
+    total_lines: usize,
+    parsed_lines: usize,
+    failed_lines: usize,
+
+    pub fn init() FileStats {
+        return .{
+            .total_lines = 0,
+            .parsed_lines = 0,
+            .failed_lines = 0,
+        };
+    }
+};
+
+/// Statistics from parallel processing
+pub const ParallelStats = struct {
+    total_files: usize,
+    files_processed: usize,
+    total_lines: usize,
+    parsed_lines: usize,
+    failed_lines: usize,
+    files_with_errors: usize,
+
+    pub fn init() ParallelStats {
+        return .{
+            .total_files = 0,
+            .files_processed = 0,
+            .total_lines = 0,
+            .parsed_lines = 0,
+            .failed_lines = 0,
+            .files_with_errors = 0,
+        };
+    }
+};

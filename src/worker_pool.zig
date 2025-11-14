@@ -1,29 +1,10 @@
 const std = @import("std");
 const Database = @import("database.zig").Database;
-const processor = @import("processor.zig");
+const file_processor = @import("file_processor.zig");
 const progress = @import("progress.zig");
 const AggregateProgress = progress.AggregateProgress;
-
-/// Statistics from parallel processing
-pub const ParallelStats = struct {
-    total_files: usize,
-    files_processed: usize,
-    total_lines: usize,
-    parsed_lines: usize,
-    failed_lines: usize,
-    files_with_errors: usize,
-
-    pub fn init() ParallelStats {
-        return .{
-            .total_files = 0,
-            .files_processed = 0,
-            .total_lines = 0,
-            .parsed_lines = 0,
-            .failed_lines = 0,
-            .files_with_errors = 0,
-        };
-    }
-};
+const types = @import("types.zig");
+const ParallelStats = types.ParallelStats;
 
 /// Context passed to each worker thread
 const WorkerContext = struct {
@@ -62,7 +43,7 @@ const WorkerContext = struct {
             const file_path = self.files[i];
 
             // Process the file (disable per-file progress in parallel mode)
-            const stats = processor.processFile(self.allocator, &db, file_path) catch |err| {
+            const stats = file_processor.processFile(self.allocator, &db, file_path) catch |err| {
                 // File processing failed, increment error counter
                 _ = self.files_with_errors.fetchAdd(1, .seq_cst);
                 // Store error for debugging (overwrites previous errors)
@@ -266,9 +247,9 @@ test "parallel processing produces same results as sequential" {
 
     try db_seq.beginAppend();
 
-    var seq_stats = processor.ProcessStats.init();
+    var seq_stats = types.FileStats.init();
     for (file_list.items) |file_path| {
-        const stats = try processor.processFile(allocator, &db_seq, file_path);
+        const stats = try file_processor.processFile(allocator, &db_seq, file_path);
         seq_stats.total_lines += stats.total_lines;
         seq_stats.parsed_lines += stats.parsed_lines;
         seq_stats.failed_lines += stats.failed_lines;

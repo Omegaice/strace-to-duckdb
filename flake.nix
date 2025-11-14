@@ -39,7 +39,9 @@
 
           packages.default = pkgs.callPackage ./.nix/strace-to-duckdb { };
 
-          checks.default = self'.packages.default;
+          checks.default = self'.packages.default.overrideAttrs (old: {
+            doCheck = true;
+          });
 
           devShells.default = pkgs.mkShell {
             inputsFrom = [

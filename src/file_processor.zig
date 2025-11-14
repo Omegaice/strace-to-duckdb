@@ -2,21 +2,9 @@ const std = @import("std");
 const parser = @import("parser.zig");
 const database = @import("database.zig");
 const Database = database.Database;
-
-/// Statistics from processing a trace file
-pub const ProcessStats = struct {
-    total_lines: usize,
-    parsed_lines: usize,
-    failed_lines: usize,
-
-    pub fn init() ProcessStats {
-        return .{
-            .total_lines = 0,
-            .parsed_lines = 0,
-            .failed_lines = 0,
-        };
-    }
-};
+const types = @import("types.zig");
+const utils = @import("utils.zig");
+const FileStats = types.FileStats;
 
 /// Line counting statistics
 const LineStats = struct {
@@ -54,40 +42,18 @@ fn countLinesAndMaxLength(file_path: []const u8, max_allowed: usize) !LineStats 
     return stats;
 }
 
-/// Extract PID from trace filename
-/// Expected format: *.<pid> or *.trace.<pid>
-/// Returns null if no PID found
-pub fn extractPid(filename: []const u8) ?i32 {
-    // Find the last '.' in the filename
-    var i: usize = filename.len;
-    while (i > 0) {
-        i -= 1;
-        if (filename[i] == '.') {
-            // Everything after the last '.' should be the PID
-            const pid_str = filename[i + 1 ..];
-            if (pid_str.len == 0) return null;
-
-            // Try to parse as integer
-            const pid = std.fmt.parseInt(i32, pid_str, 10) catch return null;
-            return pid;
-        }
-    }
-
-    return null;
-}
-
 /// Process a single strace trace file
 /// Returns statistics about the processing
 pub fn processFile(
     allocator: std.mem.Allocator,
     db: *Database,
     file_path: []const u8,
-) !ProcessStats {
-    var stats = ProcessStats.init();
+) !FileStats {
+    var stats = FileStats.init();
 
     // Extract PID from filename
     const filename = std.fs.path.basename(file_path);
-    const pid = extractPid(filename) orelse 0; // Default to 0 if no PID found
+    const pid = utils.extractPidFromFilename(filename) orelse 0; // Default to 0 if no PID found
 
     // Maximum line length we'll process (10MB sanity cap)
     const MAX_LINE_SIZE: usize = 10 * 1024 * 1024;
@@ -148,33 +114,6 @@ pub fn processFile(
 // ============================================================================
 // TESTS
 // ============================================================================
-
-test "extractPid from standard filename" {
-    try std.testing.expectEqual(@as(?i32, 12345), extractPid("zoom-trace-20240101-120000.12345"));
-    try std.testing.expectEqual(@as(?i32, 5678), extractPid("strace.5678"));
-    try std.testing.expectEqual(@as(?i32, 999), extractPid("trace.999"));
-}
-
-test "extractPid from filename with multiple dots" {
-    try std.testing.expectEqual(@as(?i32, 12345), extractPid("my.trace.file.12345"));
-    try std.testing.expectEqual(@as(?i32, 99), extractPid("a.b.c.d.99"));
-}
-
-test "extractPid returns null for no PID" {
-    try std.testing.expectEqual(@as(?i32, null), extractPid("no-pid-here.txt"));
-    try std.testing.expectEqual(@as(?i32, null), extractPid("trace.log"));
-    try std.testing.expectEqual(@as(?i32, null), extractPid("invalid.abc"));
-}
-
-test "extractPid returns null for empty extension" {
-    try std.testing.expectEqual(@as(?i32, null), extractPid("file."));
-    try std.testing.expectEqual(@as(?i32, null), extractPid("trace."));
-}
-
-test "extractPid returns null for no extension" {
-    try std.testing.expectEqual(@as(?i32, null), extractPid("noextension"));
-    try std.testing.expectEqual(@as(?i32, null), extractPid("trace"));
-}
 
 test "processFile with valid trace data" {
     const allocator = std.testing.allocator;

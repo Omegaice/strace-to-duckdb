@@ -56,8 +56,6 @@ pub fn build(b: *std.Build) void {
     bench.linkSystemLibrary("duckdb");
     bench.linkLibC();
 
-    b.installArtifact(bench);
-
     const bench_cmd = b.addRunArtifact(bench);
     const bench_step = b.step("bench", "Run micro-benchmarks");
     bench_step.dependOn(&bench_cmd.step);
@@ -78,11 +76,12 @@ pub fn build(b: *std.Build) void {
     // Test individual modules
     const modules = [_][]const u8{
         "src/types.zig",
+        "src/utils.zig",
         "src/parser.zig",
         "src/progress.zig",
         "src/database.zig",
-        "src/processor.zig",
-        "src/parallel_processor.zig",
+        "src/file_processor.zig",
+        "src/worker_pool.zig",
     };
 
     for (modules) |module_path| {
@@ -99,6 +98,7 @@ pub fn build(b: *std.Build) void {
         module_test.linkSystemLibrary("duckdb");
 
         const run_module_test = b.addRunArtifact(module_test);
+        run_module_test.has_side_effects = true;
         test_step.dependOn(&run_module_test.step);
     }
 }
