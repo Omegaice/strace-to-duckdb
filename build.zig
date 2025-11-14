@@ -29,6 +29,39 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    // Benchmark configuration
+    const zbench_dep = b.dependency("zbench", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const bench = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/main.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+
+    // Add zBench module
+    bench.root_module.addImport("zbench", zbench_dep.module("zbench"));
+
+    // Add parser only - other modules cause conflicts due to shared types.zig
+    bench.root_module.addAnonymousImport("parser", .{
+        .root_source_file = b.path("src/parser.zig"),
+    });
+
+    // Link DuckDB and libc for benchmarks
+    bench.linkSystemLibrary("duckdb");
+    bench.linkLibC();
+
+    b.installArtifact(bench);
+
+    const bench_cmd = b.addRunArtifact(bench);
+    const bench_step = b.step("bench", "Run micro-benchmarks");
+    bench_step.dependOn(&bench_cmd.step);
+
     // Test configuration
     const test_step = b.step("test", "Run all tests");
 

@@ -5,6 +5,30 @@ const Syscall = types.Syscall;
 /// Result of parsing a line - either a syscall or null if unparseable
 pub const ParseResult = ?Syscall;
 
+/// Find the position of closing ')' that matches the opening '('
+/// This handles nested parentheses in syscall arguments
+/// Starts with depth 1 (assumes we already passed the opening '(')
+/// Returns the position of ')' or null if not found
+fn findClosingParen(line: []const u8) ?usize {
+    var depth: i32 = 1; // Start at 1 since we already passed the opening '('
+    var i: usize = 0;
+
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+
+        if (c == '(') {
+            depth += 1;
+        } else if (c == ')') {
+            depth -= 1;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+
+    return null;
+}
+
 /// Parse a single line of strace output
 /// Caller owns the returned Syscall strings (they reference the input line)
 pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !ParseResult {
@@ -39,6 +63,11 @@ pub fn parseLine(allocator: std.mem.Allocator, line: []const u8) !ParseResult {
 fn parseRegular(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
     _ = allocator;
 
+    // Skip lines with <unfinished ...> - those should be parsed by parseUnfinished
+    if (std.mem.indexOf(u8, line, "<unfinished ...>") != null) {
+        return null;
+    }
+
     // Find timestamp (format: HH:MM:SS.microseconds)
     const timestamp_end = blk: {
         var i: usize = 0;
@@ -61,10 +90,16 @@ fn parseRegular(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
     const syscall = rest[0..syscall_end];
     rest = rest[syscall_end + 1 ..]; // skip '('
 
-    // Find end of args (look for ') = ')
-    const args_end = std.mem.indexOf(u8, rest, ") = ") orelse return null;
-    const args = rest[0..args_end];
-    rest = rest[args_end + 4 ..]; // skip ') = '
+    // Find the closing ')' by counting backwards from the end
+    // This handles nested parentheses in syscall arguments
+    const close_paren = findClosingParen(rest) orelse return null;
+
+    // Verify we have '=' after the ')' (with optional whitespace)
+    const after_paren = std.mem.trimLeft(u8, rest[close_paren + 1 ..], " \t");
+    if (after_paren.len == 0 or after_paren[0] != '=') return null;
+
+    const args = rest[0..close_paren];
+    rest = std.mem.trimLeft(u8, after_paren[1..], " \t"); // skip '=' and whitespace
 
     // Parse return value (can be decimal, hex, or ?)
     var return_value: ?i64 = null;
@@ -211,10 +246,16 @@ fn parseResumed(allocator: std.mem.Allocator, line: []const u8) !?Syscall {
     const syscall = rest[0..resumed_pos];
     rest = rest[resumed_pos + 9 ..]; // skip ' resumed>'
 
-    // Find args (everything before ') = ')
-    const args_end = std.mem.indexOf(u8, rest, ") = ") orelse return null;
-    const args = rest[0..args_end];
-    rest = rest[args_end + 4 ..]; // skip ') = '
+    // Find the closing ')' by counting backwards from the end
+    // This handles nested parentheses in syscall arguments
+    const close_paren = findClosingParen(rest) orelse return null;
+
+    // Verify we have '=' after the ')' (with optional whitespace)
+    const after_paren = std.mem.trimLeft(u8, rest[close_paren + 1 ..], " \t");
+    if (after_paren.len == 0 or after_paren[0] != '=') return null;
+
+    const args = rest[0..close_paren];
+    rest = std.mem.trimLeft(u8, after_paren[1..], " \t"); // skip '=' and whitespace
 
     // Parse return value
     var return_value: ?i64 = null;
@@ -377,6 +418,37 @@ test "parse unfinished syscall" {
     try std.testing.expectEqual(false, syscall.resumed);
 }
 
+test "parse unfinished syscall with closing paren and return value" {
+    const allocator = std.testing.allocator;
+    // Real format from strace output
+    const line = "22:21:24.927885 poll([{fd=8, events=POLLIN}, {fd=7, events=POLLIN}], 2, -1 <unfinished ...>) = ?";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+
+    try std.testing.expectEqualStrings("22:21:24.927885", syscall.timestamp);
+    try std.testing.expectEqualStrings("poll", syscall.syscall);
+    try std.testing.expectEqualStrings("[{fd=8, events=POLLIN}, {fd=7, events=POLLIN}], 2, -1 ", syscall.args);
+    try std.testing.expectEqual(@as(?i64, null), syscall.return_value);
+    try std.testing.expectEqual(true, syscall.unfinished);
+    try std.testing.expectEqual(false, syscall.resumed);
+}
+
+test "parse unfinished epoll_wait" {
+    const allocator = std.testing.allocator;
+    const line = "22:21:12.766934 epoll_wait(31 <unfinished ...>) = ?";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+
+    try std.testing.expectEqualStrings("epoll_wait", syscall.syscall);
+    try std.testing.expectEqualStrings("31 ", syscall.args);
+    try std.testing.expectEqual(@as(?i64, null), syscall.return_value);
+    try std.testing.expectEqual(true, syscall.unfinished);
+}
+
 test "parse resumed syscall" {
     const allocator = std.testing.allocator;
     const line = "10:23:45.123456 <... read resumed>\"data\", 100) = 4 <0.000042>";
@@ -520,4 +592,72 @@ test "various successful syscall patterns have no error codes" {
     try std.testing.expect(write_result != null);
     try std.testing.expectEqual(@as(?i64, 5), write_result.?.return_value);
     try std.testing.expectEqual(@as(?[]const u8, null), write_result.?.error_code);
+}
+
+test "parse syscall with variable whitespace between ) and =" {
+    const allocator = std.testing.allocator;
+    // Real example from strace output with lots of spaces
+    const line = "10:23:45.123456 brk(NULL)               = 0x55555557b000 <0.000010>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqualStrings("brk", syscall.syscall);
+    try std.testing.expectEqualStrings("NULL", syscall.args);
+    try std.testing.expectEqual(@as(?i64, 0x55555557b000), syscall.return_value);
+    try std.testing.expectEqual(@as(?f64, 0.000010), syscall.duration);
+}
+
+test "parse syscall with nested parentheses in arguments" {
+    const allocator = std.testing.allocator;
+    // fstat with makedev() call in arguments
+    const line = "10:23:45.123456 fstat(3, {st_mode=S_IFCHR|0600, st_rdev=makedev(0x88, 0), ...}) = 0 <0.000015>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqualStrings("fstat", syscall.syscall);
+    try std.testing.expectEqualStrings("3, {st_mode=S_IFCHR|0600, st_rdev=makedev(0x88, 0), ...}", syscall.args);
+    try std.testing.expectEqual(@as(?i64, 0), syscall.return_value);
+}
+
+test "parse wait4 with multiple nested parentheses" {
+    const allocator = std.testing.allocator;
+    // wait4 with WIFEXITED/WEXITSTATUS macros
+    const line = "10:23:45.123456 wait4(-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 12345 <0.002000>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqualStrings("wait4", syscall.syscall);
+    try std.testing.expectEqualStrings("-1, [{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL", syscall.args);
+    try std.testing.expectEqual(@as(?i64, 12345), syscall.return_value);
+    try std.testing.expectEqual(@as(?f64, 0.002000), syscall.duration);
+}
+
+test "parse resumed syscall with nested parentheses" {
+    const allocator = std.testing.allocator;
+    // Resumed syscall with nested parens
+    const line = "10:23:45.123456 <... wait4 resumed>[{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL) = 12345 <0.002000>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqualStrings("wait4", syscall.syscall);
+    try std.testing.expectEqualStrings("[{WIFEXITED(s) && WEXITSTATUS(s) == 0}], 0, NULL", syscall.args);
+    try std.testing.expectEqual(@as(?i64, 12345), syscall.return_value);
+    try std.testing.expectEqual(true, syscall.resumed);
+}
+
+test "parse resumed syscall with variable whitespace" {
+    const allocator = std.testing.allocator;
+    const line = "10:23:45.123456 <... brk resumed>)               = 0x55555557b000 <0.000010>";
+    const result = try parseLine(allocator, line);
+
+    try std.testing.expect(result != null);
+    const syscall = result.?;
+    try std.testing.expectEqualStrings("brk", syscall.syscall);
+    try std.testing.expectEqualStrings("", syscall.args);
+    try std.testing.expectEqual(@as(?i64, 0x55555557b000), syscall.return_value);
+    try std.testing.expectEqual(true, syscall.resumed);
 }
